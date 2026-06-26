@@ -17,6 +17,11 @@
   // When the user clicks a per-form scan icon, that container becomes the scan target.
   let manualTarget = null;
 
+  // Opt-in debug logging: run `localStorage.smartFormDebug = '1'` in the page console.
+  function dbg(...args) {
+    try { if (localStorage.getItem('smartFormDebug') === '1') console.log('[SmartForm]', ...args); } catch (_) {}
+  }
+
   // Built-in test data profiles (AU-focused for Brisbane/Mansfield dev context)
   const BUILTIN_PROFILES = {
     'au-personal': {
@@ -305,6 +310,14 @@
 
   // Don't fill site/product search boxes during page-wide scans.
   function isSearchField(el) {
+    // ARIA comboboxes (vue-select, react-select, etc.) render their input as
+    // type="search" but are option pickers — NOT free-text site search.
+    if (el.getAttribute('aria-autocomplete') || el.getAttribute('aria-controls') ||
+        el.getAttribute('role') === 'combobox' ||
+        (el.className && typeof el.className === 'string' &&
+         /\b(vs__search|select__input|select-search|multiselect)\b/.test(el.className))) {
+      return false;
+    }
     if ((el.type || '').toLowerCase() === 'search') return true;
     const hay = `${el.name || ''} ${el.id || ''} ${el.placeholder || ''} ${el.getAttribute('aria-label') || ''}`.toLowerCase();
     if (/\bsearch\b/.test(hay)) return true;
@@ -558,6 +571,109 @@
     });
   }
 
+  // --- ARIA option-list comboboxes (country/region, state/territory) ---
+  // These are an <input aria-autocomplete="list" aria-controls="…"> backed by a
+  // popup list of options. They can't be filled by setting .value — we must open
+  // the list and click the matching option.
+
+  // Abbreviation <-> full-name aliases so we match option text regardless of which
+  // form the option list uses vs. what the profile stores.
+  const VALUE_ALIASES = {
+    qld: ['queensland'], nsw: ['new south wales'], vic: ['victoria'], sa: ['south australia'],
+    wa: ['western australia'], tas: ['tasmania'], act: ['australian capital territory'], nt: ['northern territory'],
+    ca: ['california'], ny: ['new york'], tx: ['texas'],
+    australia: ['au', 'aus'], 'united states': ['us', 'usa', 'united states of america']
+  };
+  function valueCandidates(value) {
+    const v = String(value);
+    return [v, ...(VALUE_ALIASES[v.toLowerCase()] || [])];
+  }
+
+  // Set an input's value so a React/Vue value-tracker registers the change.
+  function setInputValue(el, value) {
+    try {
+      const desc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value');
+      if (desc && desc.set) desc.set.call(el, value); else el.value = value;
+    } catch (_) { el.value = value; }
+  }
+
+  // An ARIA combobox backed by a discrete option list (not a free-text address line).
+  function isOptionListCombobox(field, el) {
+    const cat = getFieldCategory(field);
+    if (cat === 'address1' || cat === 'address2') return false;
+    if (cat === 'country' || cat === 'state') return true;
+    return !!(el.getAttribute('aria-controls') || el.getAttribute('aria-owns'));
+  }
+
+  // Collect the visible option elements from the listbox an input controls.
+  function comboboxOptions(input) {
+    const id = (input.getAttribute('aria-controls') || input.getAttribute('aria-owns') || '').split(' ')[0];
+    let box = id ? document.getElementById(id) : null;
+    if (!box) box = Array.from(document.querySelectorAll('[role="listbox"]')).find(isVisible) || null;
+    if (!box) { dbg('combobox: no listbox found (aria-controls=', id, ', visible [role=listbox] count=', document.querySelectorAll('[role="listbox"]').length, ')'); return []; }
+    let opts = Array.from(box.querySelectorAll('[role="option"]'));
+    if (!opts.length) opts = Array.from(box.querySelectorAll('li, [class*="option" i]'));
+    const visible = opts.filter(isVisible);
+    dbg('combobox: listbox', box.id || box.className, '| raw opts:', opts.length, '| visible opts:', visible.length,
+        '| first:', opts[0] ? opts[0].textContent.trim().slice(0, 30) : '-');
+    return visible;
+  }
+
+  function clickOption(opt) {
+    ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(type => {
+      try { opt.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window })); } catch (_) {}
+    });
+  }
+
+  // Fill an option-list combobox: open it (focus shows the list), find the option
+  // matching the value (abbreviation/full-name aware), and click it. Falls back to
+  // typing each candidate to filter the list, then clicking.
+  async function fillComboboxList(input, value) {
+    const cands = valueCandidates(value).map(s => s.toLowerCase());
+
+    // Open the popup: focus (many widgets open on focus), plus a full click sequence
+    // (others open on click) and ArrowDown (keyboard-driven widgets).
+    const openList = () => {
+      try { input.focus(); } catch (_) {}
+      input.dispatchEvent(new Event('focus', { bubbles: true }));
+      ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(t => {
+        try { input.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })); } catch (_) {}
+      });
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40, which: 40, bubbles: true }));
+    };
+    const tryPick = () => {
+      const opts = comboboxOptions(input);
+      if (!opts.length) return false;
+      let match = null;
+      for (const c of cands) { match = opts.find(o => o.textContent.trim().toLowerCase() === c); if (match) break; }
+      if (!match) {
+        for (const c of cands) {
+          if (c.length < 2) continue;
+          match = opts.find(o => o.textContent.trim().toLowerCase().includes(c));
+          if (match) break;
+        }
+      }
+      dbg('combobox', JSON.stringify(value), '→ options:', opts.length, '| match:', match ? match.textContent.trim() : 'NONE');
+      if (!match) return false;
+      clickOption(match);
+      return true;
+    };
+
+    // Open and poll for options (they often render asynchronously).
+    openList();
+    for (let i = 0; i < 8; i++) { if (tryPick()) return true; await sleep(70); }
+
+    // Type each candidate to filter the list, then poll again.
+    for (const c of valueCandidates(value)) {
+      setInputValue(input, c);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: c.slice(-1) || 'a', bubbles: true }));
+      for (let i = 0; i < 6; i++) { if (tryPick()) return true; await sleep(70); }
+    }
+    dbg('combobox', JSON.stringify(value), '→ no option matched');
+    return false;
+  }
+
   /**
    * Fill using a named profile (heuristic matching).
    * opts.categories — only fill fields in these categories (subset fill).
@@ -576,6 +692,8 @@
     if (!detectedFields.length) {
       return { success: false, message: 'No fillable fields detected on page.' };
     }
+    dbg('fill: detected fields →', detectedFields.map(f =>
+      `${f.label || f.name || f.type}[${getFieldCategory(f) || '?'}${isAutocompleteInput(f.element) ? ',auto' : ''}]`).join('  '));
 
     let profile = BUILTIN_PROFILES[profileKey] || BUILTIN_PROFILES['au-personal'];
     if (opts.unique) profile = uniquifyProfile(profile);
@@ -624,11 +742,26 @@
 
           const value = valueForField(field, category, profile, allow);
           if (value === null || value === undefined) continue;
+
           const isAuto = isAutocompleteInput(el);
+
+          // ARIA option-list combobox (country/region, state/territory): open the
+          // list and click the matching option — setting .value does nothing here.
+          if (isAuto) {
+            const optionCombo = isOptionListCombobox(field, el);
+            dbg('field', JSON.stringify(field.label), '| category:', category, '| autocomplete: yes | optionList:', optionCombo, '| value:', JSON.stringify(value),
+                '| aria-controls:', el.getAttribute('aria-controls'));
+            if (optionCombo) {
+              if (await fillComboboxList(el, value)) { changed++; filledCount++; }
+              handled.add(el);
+              continue;
+            }
+          }
+
           if (applyValueToElement(el, value, { noBlur: isAuto })) {
             changed++; filledCount++;
             intended.set(el, value);
-            // Immediately dismiss the autocomplete so no prediction is selected.
+            // Free-text autocomplete (address line): dismiss so no prediction is selected.
             if (isAuto) dismissAutocomplete(el);
           }
           handled.add(el);
