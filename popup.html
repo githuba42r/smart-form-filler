@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SmartForm Filler</title>
+  <style>
+    :root {
+      --primary: #2563eb;
+      --primary-dark: #1e40af;
+      --success: #16a34a;
+      --warning: #ca8a04;
+      --danger: #dc2626;
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --text: #0f172a;
+      --text-muted: #64748b;
+      --border: #e2e8f0;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f172a;
+        --card: #1e293b;
+        --text: #f1f5f9;
+        --text-muted: #94a3b8;
+        --border: #334155;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 0;
+      width: 380px;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .header {
+      background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+      color: white;
+      padding: 14px 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .header .logo {
+      width: 28px;
+      height: 28px;
+      background: rgba(255,255,255,0.25);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 15px;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 17px;
+      font-weight: 600;
+    }
+    .header .version {
+      margin-left: auto;
+      font-size: 11px;
+      opacity: 0.85;
+      background: rgba(255,255,255,0.2);
+      padding: 1px 6px;
+      border-radius: 999px;
+    }
+
+    .content {
+      padding: 14px 16px;
+    }
+
+    .status-bar {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 12px;
+      margin-bottom: 12px;
+      font-size: 12.5px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .status-bar .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--success);
+      flex-shrink: 0;
+    }
+    .status-bar .dot.warning { background: var(--warning); }
+    .status-bar .dot.error { background: var(--danger); }
+
+    .section-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin: 14px 0 6px;
+    }
+
+    .field-summary {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+    }
+    .field-summary .count {
+      font-size: 22px;
+      font-weight: 700;
+      line-height: 1;
+      color: var(--primary);
+    }
+    .field-summary .meta {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .profile-select {
+      width: 100%;
+      padding: 9px 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--card);
+      color: var(--text);
+      font-size: 14px;
+      margin-bottom: 10px;
+      cursor: pointer;
+    }
+
+    .btn {
+      width: 100%;
+      padding: 10px 14px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: all 0.1s ease;
+      margin-bottom: 8px;
+    }
+    .btn-primary {
+      background: var(--primary);
+      color: white;
+    }
+    .btn-primary:hover { background: var(--primary-dark); }
+    .btn-secondary {
+      background: var(--card);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-secondary:hover { background: #f1f5f9; }
+    .btn-ai {
+      background: linear-gradient(90deg, #7c3aed, #6366f1);
+      color: white;
+    }
+    .btn-ai:hover { filter: brightness(1.05); }
+    .btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .btn-row {
+      display: flex;
+      gap: 8px;
+    }
+    .btn-row .btn {
+      flex: 1;
+      margin-bottom: 0;
+    }
+
+    .result {
+      margin-top: 10px;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      display: none;
+    }
+    .result.success {
+      background: #dcfce7;
+      color: #166534;
+      border: 1px solid #86efac;
+    }
+    .result.error {
+      background: #fee2e2;
+      color: #991b1b;
+      border: 1px solid #fca5a5;
+    }
+    .result.info {
+      background: #e0f2fe;
+      color: #0369a1;
+      border: 1px solid #7dd3fc;
+    }
+
+    .footer {
+      padding: 10px 16px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+    }
+    .footer a {
+      color: var(--primary);
+      text-decoration: none;
+    }
+    .footer a:hover { text-decoration: underline; }
+
+    .small {
+      font-size: 11.5px;
+      color: var(--text-muted);
+    }
+
+    .ai-status {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #f1e7ff;
+      color: #6b21a8;
+      display: inline-block;
+    }
+
+    /* Active model display */
+    .model-info {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 9px 12px;
+      margin-bottom: 12px;
+    }
+    .model-info.recommended {
+      border-color: #f59e0b;
+      box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.12);
+    }
+    .model-info-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .model-info-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .model-info-name {
+      font-size: 12.5px;
+      font-weight: 600;
+      font-family: ui-monospace, monospace;
+      margin-top: 4px;
+      word-break: break-all;
+    }
+    .model-info-name.recommended { color: #b45309; }
+    .model-info-reasons {
+      margin: 7px 0 0;
+      padding-left: 18px;
+    }
+    .model-info-reasons li {
+      font-size: 11.5px;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+    @media (prefers-color-scheme: dark) {
+      .model-info-name.recommended { color: #fcd34d; }
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="logo">SF</div>
+    <h1>SmartForm Filler</h1>
+    <span class="version">v1.0</span>
+  </div>
+
+  <div class="content">
+    <!-- Status -->
+    <div id="statusBar" class="status-bar">
+      <div class="dot"></div>
+      <div id="statusText">Ready. Click Scan to analyze the current page.</div>
+    </div>
+
+    <!-- Active AI model -->
+    <div id="modelInfo" class="model-info" style="display: none;">
+      <div class="model-info-row">
+        <span class="model-info-label">Active model</span>
+        <span id="modelInfoProvider" class="ai-status"></span>
+      </div>
+      <div id="modelInfoName" class="model-info-name">—</div>
+      <ul id="modelInfoReasons" class="model-info-reasons" style="display: none;"></ul>
+    </div>
+
+    <!-- Scan Results -->
+    <div id="scanSection" style="display: none;">
+      <div class="section-title">Detected on page</div>
+      <div class="field-summary">
+        <div style="display:flex; align-items:baseline; gap:8px;">
+          <div id="fieldCount" class="count">0</div>
+          <div>
+            <div id="formCount" style="font-weight:600;">fields</div>
+            <div id="pageInfo" class="meta"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Profile -->
+      <div class="section-title">Test Profile</div>
+      <select id="profileSelect" class="profile-select">
+        <option value="au-personal">AU Personal (Mansfield/Brisbane)</option>
+        <option value="au-business">AU Business / Company</option>
+        <option value="us-test">US Test User</option>
+        <option value="minimal">Minimal / Edge Case</option>
+      </select>
+
+      <!-- Action Buttons -->
+      <button id="btnHeuristic" class="btn btn-primary">
+        <span>⚡ Quick Smart Fill (Heuristic)</span>
+      </button>
+
+      <button id="btnAI" class="btn btn-ai">
+        <span>🧠 Fill with Local AI (Ollama)</span>
+      </button>
+
+      <div class="btn-row">
+        <button id="btnRescan" class="btn btn-secondary">Re-scan</button>
+        <button id="btnClear" class="btn btn-secondary">Clear Fields</button>
+      </div>
+    </div>
+
+    <!-- Initial / No scan state -->
+    <div id="initialSection">
+      <button id="btnInitialScan" class="btn btn-primary" style="margin-top:4px;">
+        Scan page for forms &amp; fields
+      </button>
+      <p class="small" style="margin: 10px 0 0; text-align:center;">
+        Works best on development, staging, and localhost sites.
+      </p>
+    </div>
+
+    <!-- Result / Status messages -->
+    <div id="resultBox" class="result"></div>
+  </div>
+
+  <div class="footer">
+    <a href="#" id="openOptions">Settings &amp; AI Config</a>
+    <span class="small">Ollama ready?</span>
+  </div>
+
+  <script src="recommendations.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

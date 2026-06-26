@@ -1,0 +1,1017 @@
+/**
+ * SmartForm Filler - Content Script
+ * Runs on every page. Handles form scanning, field classification, and filling.
+ * Communicates with popup via chrome.runtime messaging.
+ */
+
+(() => {
+  'use strict';
+
+  // Guard against double-injection (manifest + popup's on-demand injectContentScript).
+  if (window.__smartFormFillerLoaded) return;
+  window.__smartFormFillerLoaded = true;
+
+  // In-memory store for the current page's detected fields (live element references)
+  let detectedFields = [];
+  let lastScanTime = 0;
+  // When the user clicks a per-form scan icon, that container becomes the scan target.
+  let manualTarget = null;
+
+  // Built-in test data profiles (AU-focused for Brisbane/Mansfield dev context)
+  const BUILTIN_PROFILES = {
+    'au-personal': {
+      name: 'AU Personal (Mansfield/Brisbane)',
+      firstName: 'Jordan',
+      lastName: 'Ellis',
+      fullName: 'Jordan Ellis',
+      email: 'jordan.ellis.dev@example.com.au',
+      phone: '0412 987 654',
+      address1: '17 Riverside Drive',
+      address2: 'Apt 12',
+      city: 'Mansfield',
+      state: 'QLD',
+      postcode: '4122',
+      country: 'Australia',
+      company: '',
+      username: 'jordan_dev_qld',
+      password: 'DevTest2026!',
+      dob: '1988-03-22',
+      genericText: 'This is automated test input generated for development and QA validation purposes.'
+    },
+    'au-business': {
+      name: 'AU Business / Company',
+      firstName: 'Taylor',
+      lastName: 'Morgan',
+      fullName: 'Taylor Morgan',
+      email: 'taylor.morgan@techtest.com.au',
+      phone: '07 3123 4567',
+      address1: 'Level 8, 200 Queen Street',
+      address2: '',
+      city: 'Brisbane',
+      state: 'QLD',
+      postcode: '4000',
+      country: 'Australia',
+      company: 'Aether Dynamics Pty Ltd',
+      username: 'tmorgan_aether',
+      password: 'BizTestPass!42',
+      dob: '1992-11-05',
+      genericText: 'Business account creation test data - for internal development environment only.'
+    },
+    'us-test': {
+      name: 'US Test User',
+      firstName: 'Casey',
+      lastName: 'Rivera',
+      fullName: 'Casey Rivera',
+      email: 'casey.rivera.test@gmail.com',
+      phone: '(415) 555-0192',
+      address1: '2450 Market Street',
+      address2: 'Suite 300',
+      city: 'San Francisco',
+      state: 'CA',
+      postcode: '94114',
+      country: 'United States',
+      company: 'Pacific Labs Inc',
+      username: 'casey_rivera_sf',
+      password: 'UsaTest2026#',
+      dob: '1995-07-18',
+      genericText: 'US-based test profile for international form validation.'
+    },
+    'minimal': {
+      name: 'Minimal / Edge Case',
+      firstName: 'A',
+      lastName: 'B',
+      fullName: 'A B',
+      email: 'a@b.co',
+      phone: '0400000000',
+      address1: '1 Test St',
+      address2: '',
+      city: 'Testville',
+      state: 'TS',
+      postcode: '0000',
+      country: 'Australia',
+      company: '',
+      username: 'test',
+      password: 'test',
+      dob: '2000-01-01',
+      genericText: 'x'
+    }
+  };
+
+  /**
+   * Find the best human-readable label for a form control.
+   */
+  function getBestLabel(el) {
+    if (!el) return 'Unnamed field';
+
+    // 1. Explicit label[for]
+    if (el.id) {
+      const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+      if (label && label.textContent.trim()) return label.textContent.trim();
+    }
+
+    // 2. aria-label (highest priority for accessibility)
+    const ariaLabel = el.getAttribute('aria-label');
+    if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
+
+    // 3. aria-labelledby
+    const labelledBy = el.getAttribute('aria-labelledby');
+    if (labelledBy) {
+      const labelEl = document.getElementById(labelledBy.split(' ')[0]);
+      if (labelEl && labelEl.textContent.trim()) return labelEl.textContent.trim();
+    }
+
+    // 4. Wrapping <label>
+    const wrappingLabel = el.closest('label');
+    if (wrappingLabel) {
+      // Remove the input's own text/value if present
+      const clone = wrappingLabel.cloneNode(true);
+      const inputInClone = clone.querySelector('input,select,textarea');
+      if (inputInClone) inputInClone.remove();
+      const text = clone.textContent.trim();
+      if (text) return text;
+    }
+
+    // 5. Nearby previous sibling that looks like a label
+    let sibling = el.previousElementSibling;
+    let attempts = 0;
+    while (sibling && attempts < 4) {
+      const txt = sibling.textContent.trim();
+      if (txt.length > 2 && txt.length < 120 && !/^(input|select|button|textarea)$/i.test(sibling.tagName)) {
+        // Heuristic: looks like a label if short and not another control
+        if (/[a-zA-Z]/.test(txt) && !/^\d+$/.test(txt)) {
+          return txt;
+        }
+      }
+      sibling = sibling.previousElementSibling;
+      attempts++;
+    }
+
+    // 6. Placeholder or name/id cleaned up
+    if (el.placeholder && el.placeholder.trim().length > 2) {
+      return el.placeholder.trim();
+    }
+    const attrName = el.name || el.id || '';
+    if (attrName) {
+      return attrName
+        .replace(/[-_]/g, ' ')
+        .replace(/([a-z])([A-Z])/g, '$1 $2')
+        .replace(/\b\w/g, c => c.toUpperCase())
+        .trim();
+    }
+
+    return 'Field ' + (el.type || el.tagName).toLowerCase();
+  }
+
+  /**
+   * Classify a field into a semantic category for heuristic matching.
+   */
+  function getFieldCategory(field) {
+    const text = `${field.label} ${field.name} ${field.placeholder}`.toLowerCase();
+    const type = (field.type || '').toLowerCase();
+
+    // Strong signals first
+    if (type === 'email' || /\bemail\b|\be-mail\b/.test(text)) return 'email';
+    if (type === 'tel' || /\bphone\b|\bmobile\b|\btel\b|\bcontact.?number\b/.test(text)) return 'phone';
+    if (/\bpassword\b|\bpwd\b|\bpass(word)?\b/.test(text)) return 'password';
+    if (type === 'date' || /\bdob\b|\bdate.?of.?birth\b|\bbirthday\b/.test(text)) return 'dob';
+
+    if (/\bfirst.?name\b|\bgiven.?name\b|\bfname\b/.test(text)) return 'firstName';
+    if (/\blast.?name\b|\bsurname\b|\blname\b|\bfamily.?name\b/.test(text)) return 'lastName';
+    if (/\bfull.?name\b|\byour.?name\b|\bname\b(?!.*(user|login|account|company))/.test(text)) return 'fullName';
+
+    if (/\bcompany\b|\bbusiness\b|\borganisation\b|\borganization\b|\bemployer\b/.test(text)) return 'company';
+    if (/\busername\b|\buser.?name\b|\blogin\b(?!.*password)/.test(text)) return 'username';
+
+    if (/\baddress.?line.?1\b|\bstreet\b|\baddr(ess)?1?\b|\broad\b|\bline 1\b/.test(text)) return 'address1';
+    if (/\baddress.?line.?2\b|\bapt\b|\bunit\b|\bsuite\b|\bline 2\b/.test(text)) return 'address2';
+    if (/\bsuburb\b|\bcity\b|\btown\b/.test(text)) return 'city';
+    if (/\bstate\b|\bprovince\b|\bterritory\b/.test(text)) return 'state';
+    if (/\bpost.?code\b|\bzip\b|\bpostal.?code\b/.test(text)) return 'postcode';
+    if (/\bcountry\b/.test(text)) return 'country';
+
+    // Generic fallbacks
+    if (type === 'textarea' || field.tagName === 'TEXTAREA') return 'genericText';
+    if (type === 'number') return 'number';
+
+    return null; // unknown -> will use fallback
+  }
+
+  /**
+   * Apply a value to a form element and dispatch the right events (important for React/Vue/Angular).
+   * opts.noBlur — skip the blur event (used for autocomplete inputs, where blur can
+   * trigger a geocode that overwrites the manually-entered value).
+   */
+  function applyValueToElement(el, value, opts = {}) {
+    if (!el || value === undefined || value === null) return false;
+
+    const tag = el.tagName.toLowerCase();
+    const inputType = (el.type || '').toLowerCase();
+
+    try {
+      if (tag === 'select') {
+        const options = Array.from(el.options);
+        // Try exact value match first
+        let opt = options.find(o => o.value === value);
+        if (!opt) {
+          // Try text content match (case insensitive)
+          opt = options.find(o => o.textContent.trim().toLowerCase() === value.toLowerCase());
+        }
+        if (!opt && options.length > 0) {
+          // Fallback: pick first non-placeholder option
+          opt = options.find(o => o.value && o.value !== '' && o.value !== '0') || options[options.length > 1 ? 1 : 0];
+        }
+        if (opt) {
+          el.value = opt.value;
+          el.selectedIndex = opt.index;
+        }
+      } else if (inputType === 'checkbox' || inputType === 'radio') {
+        const shouldCheck = ['true', '1', 'yes', 'on', 'checked'].includes(String(value).toLowerCase());
+        el.checked = shouldCheck;
+      } else if (inputType === 'date' || inputType === 'datetime-local' || inputType === 'month') {
+        // Assume value is already in correct format or try to normalize simple cases
+        el.value = value;
+      } else {
+        el.value = value;
+      }
+
+      // Critical: dispatch events so frameworks pick up the change
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      // Some libs also listen to blur or key events (skipped for autocomplete inputs).
+      if (!opts.noBlur) el.dispatchEvent(new Event('blur', { bubbles: true }));
+
+      return true;
+    } catch (e) {
+      console.warn('[SmartForm] Failed to apply value to element:', e);
+      return false;
+    }
+  }
+
+  /**
+   * Generate a reasonable fallback value when no profile data matches the category.
+   */
+  function generateFallbackValue(field) {
+    const cat = getFieldCategory(field);
+    if (cat === 'genericText') {
+      return 'Automated test entry - ' + new Date().toISOString().slice(0, 10);
+    }
+    if (cat === 'number') {
+      return Math.floor(Math.random() * 100) + 1;
+    }
+    // Last resort: short label-based or placeholder
+    const base = (field.label || field.placeholder || field.name || 'test').toLowerCase().replace(/\s+/g, '-');
+    return base.length > 3 ? base.substring(0, 20) : 'test-value-' + Date.now().toString().slice(-4);
+  }
+
+  // Fillable form controls (exclude non-data inputs).
+  const FILLABLE_SELECTOR =
+    'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea';
+
+  // Common modal / dialog / overlay containers across frameworks.
+  const MODAL_SELECTOR = [
+    'dialog[open]',
+    '[role="dialog"]', '[role="alertdialog"]', '[aria-modal="true"]',
+    '.modal.show', '.modal.in', '.modal.is-open', '.modal--open', '.modal.open',
+    '.ReactModal__Content',
+    '.MuiDialog-container', '.MuiModal-root',
+    '.ant-modal', '.ant-modal-content',
+    '.v-dialog--active',
+    '.cdk-dialog-container',
+    '.chakra-modal__content'
+  ].join(',');
+
+  // True visibility check — works for position:fixed modals (offsetParent is null for those).
+  function isVisible(el) {
+    if (!el || typeof el.getBoundingClientRect !== 'function') return false;
+    const style = getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') === 0) {
+      return false;
+    }
+    const rect = el.getBoundingClientRect();
+    return rect.width > 1 && rect.height > 1;
+  }
+
+  function isFillableControl(el) {
+    return !!(el && el.matches && el.matches(FILLABLE_SELECTOR));
+  }
+
+  function hasVisibleControls(root) {
+    const els = root.querySelectorAll(FILLABLE_SELECTOR);
+    for (const el of els) {
+      if (isVisible(el) && !el.disabled) return true;
+    }
+    return false;
+  }
+
+  // Don't fill site/product search boxes during page-wide scans.
+  function isSearchField(el) {
+    if ((el.type || '').toLowerCase() === 'search') return true;
+    const hay = `${el.name || ''} ${el.id || ''} ${el.placeholder || ''} ${el.getAttribute('aria-label') || ''}`.toLowerCase();
+    if (/\bsearch\b/.test(hay)) return true;
+    return !!el.closest('[role="search"], form[role="search"], .search, .searchbar, .search-bar, .search-box');
+  }
+
+  // Nearest ancestor with an explicit z-index (used to pick the topmost modal).
+  function effectiveZIndex(el) {
+    let node = el;
+    while (node && node.nodeType === 1 && node !== document.body) {
+      const v = parseInt(getComputedStyle(node).zIndex, 10);
+      if (!isNaN(v)) return v;
+      node = node.parentElement;
+    }
+    return 0;
+  }
+
+  // The modal/dialog the user is actually working in, if any.
+  function findActiveModal() {
+    // 1. A modal that contains the currently focused element wins.
+    const active = document.activeElement;
+    if (active && active !== document.body) {
+      const owning = active.closest(MODAL_SELECTOR);
+      if (owning && isVisible(owning) && hasVisibleControls(owning)) return owning;
+    }
+    // 2. Otherwise, the topmost visible modal that has fillable controls.
+    const candidates = Array.from(document.querySelectorAll(MODAL_SELECTOR))
+      .filter(m => isVisible(m) && hasVisibleControls(m));
+    if (!candidates.length) return null;
+    candidates.sort((a, b) => effectiveZIndex(a) - effectiveZIndex(b));
+    return candidates[candidates.length - 1];
+  }
+
+  // Best-effort human name for a modal, for user feedback.
+  function modalName(modal) {
+    const byAria = modal.getAttribute('aria-label');
+    if (byAria && byAria.trim()) return byAria.trim().slice(0, 60);
+    const labelledById = modal.getAttribute('aria-labelledby');
+    if (labelledById) {
+      const lab = document.getElementById(labelledById.split(' ')[0]);
+      if (lab && lab.textContent.trim()) return lab.textContent.trim().slice(0, 60);
+    }
+    const heading = modal.querySelector('h1, h2, h3, .modal-title, [class*="title" i], header');
+    if (heading && heading.textContent.trim()) return heading.textContent.trim().slice(0, 60);
+    return 'dialog';
+  }
+
+  // Decide what to scan: a user-picked form, a focused modal, the focused form, or the whole page.
+  function findScanRoot() {
+    // 1. A form/modal the user explicitly targeted via its scan icon.
+    if (manualTarget && manualTarget.isConnected && isVisible(manualTarget) && hasVisibleControls(manualTarget)) {
+      const name = manualTarget.matches('form') ? 'selected form' : modalName(manualTarget);
+      return { root: manualTarget, scoped: true, name };
+    }
+    manualTarget = null; // stale (e.g. modal closed) — fall back to auto-detection
+
+    const modal = findActiveModal();
+    if (modal) return { root: modal, scoped: true, name: modalName(modal) };
+
+    const active = document.activeElement;
+    if (active && active !== document.body && isFillableControl(active)) {
+      // Scope to the whole form section the focused field belongs to.
+      const section = sectionForField(active);
+      if (section && hasVisibleControls(section)) {
+        const name = section.matches('form') ? 'selected form' : modalName(section);
+        return { root: section, scoped: true, name };
+      }
+      const form = active.closest('form');
+      if (form && hasVisibleControls(form)) return { root: form, scoped: true, name: 'focused form' };
+    }
+    return { root: document, scoped: false, name: 'page' };
+  }
+
+  /**
+   * Main scan function. Populates detectedFields and returns a summary.
+   * Prefers a focused modal/overlay form over the rest of the page.
+   */
+  function scanForms() {
+    detectedFields = [];
+    const { root, scoped, name } = findScanRoot();
+
+    let controls;
+    if (scoped) {
+      // Modal or focused form — scan everything inside it (modals often lack <form>).
+      controls = Array.from(root.querySelectorAll(FILLABLE_SELECTOR));
+    } else {
+      // Page-wide: scan every fillable control (incl. div-based forms not in a <form>).
+      controls = Array.from(document.querySelectorAll(FILLABLE_SELECTOR));
+    }
+
+    controls.forEach((el, idx) => {
+      if (!isVisible(el) || el.disabled || el.readOnly) return;
+      if (isSearchField(el)) return; // never fill product/site search boxes
+      const label = getBestLabel(el);
+      detectedFields.push({
+        element: el,
+        label,
+        name: el.name || el.id || '',
+        type: el.type || el.tagName.toLowerCase(),
+        placeholder: el.placeholder || '',
+        formIndex: 0,
+        fieldIndex: idx
+      });
+    });
+
+    lastScanTime = Date.now();
+    return {
+      success: true,
+      fieldCount: detectedFields.length,
+      formCount: scoped ? 1 : (document.querySelectorAll('form').length || (detectedFields.length > 0 ? 1 : 0)),
+      scoped,
+      scopeName: name,
+      fields: detectedFields.map((f, i) => ({
+        index: i,
+        label: f.label,
+        name: f.name,
+        type: f.type,
+        placeholder: f.placeholder
+      })),
+      pageTitle: document.title,
+      url: location.href
+    };
+  }
+
+  // Category groups offered in the inline fill menu.
+  const FIELD_GROUPS = {
+    name: ['firstName', 'lastName', 'fullName', 'username', 'email', 'phone', 'dob', 'password', 'company'],
+    address: ['address1', 'address2', 'city', 'state', 'postcode', 'country']
+  };
+
+  // Make identity fields unique so repeated fills create distinct test customers.
+  let fillCounter = Math.floor((Date.now() / 1000) % 1000);
+  function uniquifyProfile(profile) {
+    fillCounter = (fillCounter + 1) % 100000;
+    const n = fillCounter;
+    const p = { ...profile };
+    if (p.email && p.email.includes('@')) {
+      const [local, domain] = p.email.split('@');
+      p.email = `${local.split('+')[0]}.${n}@${domain}`;
+    }
+    if (p.username) p.username = `${p.username}${n}`;
+    if (p.lastName) p.lastName = `${p.lastName}${n}`;
+    p.fullName = `${p.firstName || ''} ${p.lastName || ''}`.trim() || p.fullName;
+    if (p.phone) {
+      const tail = String(1000 + (n % 9000)); // 4 unique digits
+      let i = 0;
+      p.phone = p.phone.split('').reverse()
+        .map(ch => (/\d/.test(ch) && i < 4) ? tail[3 - i++] : ch)
+        .reverse().join('');
+    }
+    return p;
+  }
+
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+  // Is a control currently empty (and therefore needs filling)? A <select> whose
+  // dependency reset its options reverts to an empty/placeholder value — that counts.
+  function isEmptyValue(el) {
+    if (el.tagName.toLowerCase() === 'select') {
+      if (el.selectedIndex < 0) return true;
+      const v = (el.value || '').trim();
+      if (v === '') return true;
+      const opt = el.options[el.selectedIndex];
+      if (opt && /^(select|choose|please|--|none|—)\b/i.test(opt.textContent.trim())) return true;
+      return false;
+    }
+    return (el.value || '').trim() === '';
+  }
+
+  // How to treat a checkbox. "Same as billing/shipping" toggles must be left alone so
+  // we don't deselect them and expose an extra address section; consent boxes get checked;
+  // everything else is left at its default rather than blindly unchecked.
+  function checkboxPolicy(field) {
+    const t = `${field.label} ${field.name} ${field.placeholder}`.toLowerCase();
+    if (/same\s*as|copy\s*(from|to)?\s*(billing|shipping|postal|delivery)|(billing|shipping|delivery)\s*(address)?\s*same|use\s*(my\s*)?(billing|shipping)/.test(t)) {
+      return 'leave';
+    }
+    if (/\bagree\b|\baccept\b|\bconsent\b|terms|privacy|conditions|\bt&?cs?\b|i confirm|acknowledge/.test(t)) {
+      return 'check';
+    }
+    return 'leave';
+  }
+
+  function valueForField(field, category, profile, allow) {
+    if (category && profile[category] !== undefined && profile[category] !== '') return profile[category];
+    if (category === 'password') return profile.password || 'DevTest2026!';
+    if (category === 'genericText') return profile.genericText || 'Test data for development form.';
+    if (allow) return null; // group mode: don't invent fallback values
+    return generateFallbackValue(field);
+  }
+
+  // Inputs bound to Google Places (or similar) autocomplete. Filling these pops a
+  // prediction dropdown; we want the form's "manual entry" path instead.
+  const AUTOCOMPLETE_INPUT_SELECTOR =
+    '.pac-target-input, input[role="combobox"], input[aria-autocomplete="list"], input[aria-autocomplete="both"]';
+  function isAutocompleteInput(el) {
+    return !!(el && el.matches && el.matches(AUTOCOMPLETE_INPUT_SELECTOR));
+  }
+
+  // Force-hide Places prediction dropdowns (.pac-container) for the duration of a
+  // fill, using inline !important so it beats the library's own inline display.
+  // Returns a disposer.
+  function suppressPlacesDropdown() {
+    if (!document.querySelector('.pac-container, ' + AUTOCOMPLETE_INPUT_SELECTOR)) return null;
+    const hide = () => document.querySelectorAll('.pac-container')
+      .forEach(c => c.style.setProperty('display', 'none', 'important'));
+    hide();
+    let obs = null;
+    try {
+      obs = new MutationObserver(hide);
+      obs.observe(document.documentElement, { childList: true, subtree: true });
+    } catch (_) {}
+    return () => {
+      if (obs) obs.disconnect();
+      // Hand control back to the library so real user typing still shows predictions.
+      document.querySelectorAll('.pac-container').forEach(c => c.style.removeProperty('display'));
+    };
+  }
+
+  // Find the next focusable control after `el` in document order.
+  function nextFocusable(el) {
+    const all = Array.from(document.querySelectorAll('input:not([type="hidden"]), select, textarea, button, a[href], [tabindex]'))
+      .filter(n => isVisible(n) && !n.disabled && n.tabIndex >= 0);
+    const i = all.indexOf(el);
+    return (i >= 0 && i + 1 < all.length) ? all[i + 1] : null;
+  }
+
+  // Close the autocomplete popup the way a user does: focus the field, then Tab to
+  // the next field. Moving focus dismisses the dropdown without selecting a prediction.
+  function dismissAutocomplete(el) {
+    try {
+      el.focus();
+      const tab = { key: 'Tab', code: 'Tab', keyCode: 9, which: 9, bubbles: true };
+      el.dispatchEvent(new KeyboardEvent('keydown', tab));
+      const next = nextFocusable(el);
+      if (next) next.focus(); else el.blur();
+      el.dispatchEvent(new KeyboardEvent('keyup', tab));
+    } catch (_) {}
+  }
+
+  // Restore any text field a stray geocode may have overwritten back to our value.
+  function reassertValues(intended) {
+    intended.forEach((val, el) => {
+      if (!el || !el.isConnected) return;
+      const tag = el.tagName.toLowerCase();
+      const type = (el.type || '').toLowerCase();
+      if (tag === 'select' || type === 'checkbox' || type === 'radio') return;
+      if ((el.value || '') !== String(val)) {
+        applyValueToElement(el, val, { noBlur: isAutocompleteInput(el) });
+      }
+    });
+  }
+
+  /**
+   * Fill using a named profile (heuristic matching).
+   * opts.categories — only fill fields in these categories (subset fill).
+   * opts.unique      — generate unique identity values for repeated testing.
+   *
+   * Iterative: after each pass the form may react (country→state options change, a
+   * checkbox exposes a new address section). We re-scan and fill the newly exposed /
+   * reset fields until the form stabilises.
+   *
+   * Address autocomplete: Places dropdowns are suppressed, the autocomplete-bound
+   * line is filled LAST and immediately dismissed (Escape + blur), and values are
+   * re-asserted afterwards — replicating the form's manual address-entry path.
+   */
+  async function fillWithProfile(profileKey, opts = {}) {
+    scanForms();
+    if (!detectedFields.length) {
+      return { success: false, message: 'No fillable fields detected on page.' };
+    }
+
+    let profile = BUILTIN_PROFILES[profileKey] || BUILTIN_PROFILES['au-personal'];
+    if (opts.unique) profile = uniquifyProfile(profile);
+    const allow = opts.categories ? new Set(opts.categories) : null;
+
+    const handled = new Set();
+    const intended = new Map(); // el -> value we set (to restore after blur-geocode)
+    let filledCount = 0;
+    const MAX_PASSES = 5;
+    const unsuppress = suppressPlacesDropdown();
+
+    try {
+      for (let pass = 0; pass < MAX_PASSES; pass++) {
+        scanForms(); // pick up fields exposed/changed by the previous pass
+        let changed = 0;
+
+        // Fill autocomplete-bound inputs (address line) LAST so nothing it does can
+        // clobber the other fields.
+        const ordered = detectedFields.slice()
+          .sort((a, b) => (isAutocompleteInput(a.element) ? 1 : 0) - (isAutocompleteInput(b.element) ? 1 : 0));
+
+        for (const field of ordered) {
+          const el = field.element;
+          if (!el || !el.isConnected) continue;
+
+          const type = (el.type || '').toLowerCase();
+          const isSelect = el.tagName.toLowerCase() === 'select';
+          const category = getFieldCategory(field);
+
+          if (allow && !(category && allow.has(category))) continue; // group mode
+
+          // Already done — only revisit a <select> a dependency reset to empty.
+          if (handled.has(el) && !(isSelect && isEmptyValue(el))) continue;
+
+          if (type === 'checkbox' || type === 'radio') {
+            const policy = type === 'checkbox' ? checkboxPolicy(field) : 'leave';
+            if (policy === 'check' && !el.checked && applyValueToElement(el, 'true')) {
+              changed++; filledCount++;
+            }
+            handled.add(el); // leave "same as billing" and others untouched
+            continue;
+          }
+
+          // Don't overwrite a field the user/form already populated (idempotent re-passes).
+          if (handled.has(el) && !isEmptyValue(el)) { continue; }
+
+          const value = valueForField(field, category, profile, allow);
+          if (value === null || value === undefined) continue;
+          const isAuto = isAutocompleteInput(el);
+          if (applyValueToElement(el, value, { noBlur: isAuto })) {
+            changed++; filledCount++;
+            intended.set(el, value);
+            // Immediately dismiss the autocomplete so no prediction is selected.
+            if (isAuto) dismissAutocomplete(el);
+          }
+          handled.add(el);
+        }
+
+        if (changed === 0) break;     // form has stabilised
+        await sleep(60);              // let frameworks (React/Vue) apply dependent changes
+      }
+
+      // Safety net: restore any field a blur-geocode may have overwritten.
+      reassertValues(intended);
+    } finally {
+      if (unsuppress) { await sleep(150); unsuppress(); }
+    }
+
+    return {
+      success: true,
+      filledCount,
+      profileUsed: profile.name || profileKey,
+      message: `Filled ${filledCount} fields using ${profile.name || profileKey}`
+    };
+  }
+
+  // Clear the currently detected fields; returns a summary.
+  function clearDetected() {
+    let n = 0;
+    detectedFields.forEach(f => {
+      if (!f.element) return;
+      try {
+        if (f.element.type === 'checkbox' || f.element.type === 'radio') f.element.checked = false;
+        else f.element.value = '';
+        f.element.dispatchEvent(new Event('input', { bubbles: true }));
+        f.element.dispatchEvent(new Event('change', { bubbles: true }));
+        n++;
+      } catch (_) {}
+    });
+    return { success: true, filledCount: n, message: `Cleared ${n} fields` };
+  }
+
+  /**
+   * Fill using an explicit map of {index: value} provided (usually from AI).
+   */
+  function fillWithValueMap(valueMap) {
+    if (!detectedFields.length) {
+      return { success: false, message: 'No fields in memory. Please scan first.' };
+    }
+    if (!valueMap || typeof valueMap !== 'object') {
+      return { success: false, message: 'Invalid value map from AI.' };
+    }
+
+    let filledCount = 0;
+    Object.keys(valueMap).forEach((key) => {
+      const idx = parseInt(key, 10);
+      if (isNaN(idx) || !detectedFields[idx]) return;
+      const value = valueMap[key];
+      if (applyValueToElement(detectedFields[idx].element, value)) {
+        filledCount++;
+      }
+    });
+
+    return {
+      success: true,
+      filledCount,
+      message: `AI-assisted fill completed for ${filledCount} fields.`
+    };
+  }
+
+  // ============================================================
+  // Per-form scan icons — let the user target a specific form/modal
+  // on pages with multiple forms.
+  // ============================================================
+  const SF_UI_ATTR = 'data-smartform-ui';
+  let formButtons = [];          // { btn, target }
+  let toastEl = null, toastTimer = null;
+  let repositionScheduled = false;
+  let buildScheduled = false;
+
+  // All visible, fillable, non-search controls on the page.
+  function liveControls() {
+    return Array.from(document.querySelectorAll(FILLABLE_SELECTOR))
+      .filter(el => isVisible(el) && !el.disabled && !el.readOnly && !isSearchField(el));
+  }
+
+  // Lowest common ancestor of a set of elements.
+  function commonAncestor(els) {
+    if (!els.length) return null;
+    let anc = els[0];
+    for (let i = 1; i < els.length && anc; i++) {
+      while (anc && !anc.contains(els[i])) anc = anc.parentElement;
+    }
+    return anc;
+  }
+
+  // Tighten a section to the innermost single element that still contains ALL of
+  // its fields — avoids placing the icon on an oversized wrapper, without splitting.
+  function refineSection(el, fields) {
+    const inEl = fields.filter(f => el.contains(f));
+    let node = el;
+    while (true) {
+      const holder = Array.from(node.children)
+        .find(c => c.nodeType === 1 && inEl.every(f => c.contains(f)));
+      if (holder && holder !== node) node = holder; else break;
+    }
+    return node;
+  }
+
+  // Determine the main visible section(s) that contain forms — one per form region.
+  // The whole form (across sub-divs and even multiple <form> tags) collapses to the
+  // single common-ancestor container, so a form yields ONE icon. If fields live in
+  // genuinely separate top-level areas, each area becomes its own section.
+  function formSections() {
+    const fields = liveControls(); // visible, fillable, non-search
+    if (fields.length < 2) return [];
+
+    const lca = commonAncestor(fields);
+    if (!lca) return [];
+
+    // All fields share one container → that's the main form section.
+    if (lca !== document.body && lca !== document.documentElement) {
+      return [refineSection(lca, fields)];
+    }
+
+    // Fields span multiple top-level branches → one section per branch that has fields.
+    const sections = [];
+    const seen = new Set();
+    fields.forEach(f => {
+      let node = f;
+      while (node.parentElement &&
+             node.parentElement !== document.body &&
+             node.parentElement !== document.documentElement) {
+        node = node.parentElement;
+      }
+      if (node && node.nodeType === 1 && isVisible(node) && !seen.has(node)) {
+        seen.add(node);
+        sections.push(refineSection(node, fields));
+      }
+    });
+    return sections;
+  }
+
+  // The form section that contains a given field (for focused-field auto-scan).
+  function sectionForField(el) {
+    return formSections().find(s => s.contains(el)) || null;
+  }
+
+  function getIconTargets() {
+    return formSections();
+  }
+
+  function createScanButton(target) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.setAttribute(SF_UI_ATTR, '');
+    btn.title = 'Scan this form with SmartForm Filler';
+    btn.textContent = '✨';
+    Object.assign(btn.style, {
+      position: 'fixed', zIndex: '2147483646', width: '28px', height: '28px',
+      borderRadius: '50%', border: 'none', cursor: 'pointer', padding: '0',
+      background: '#2563eb', color: '#fff', fontSize: '15px', lineHeight: '28px',
+      textAlign: 'center', boxShadow: '0 2px 6px rgba(0,0,0,0.25)', display: 'none'
+    });
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      onScanIconClick(target, btn);
+    });
+    return btn;
+  }
+
+  let fillMenu = null;
+
+  function onScanIconClick(target, btn) {
+    manualTarget = target;
+    const result = scanForms(); // scopes to manualTarget and stores live field refs
+    flashButton(btn, result.fieldCount);
+    if (!result.fieldCount) {
+      showToast('No fillable fields found in this form');
+      return;
+    }
+    showFillMenu(btn, result);
+  }
+
+  function closeFillMenu() {
+    if (fillMenu) { fillMenu.remove(); fillMenu = null; }
+    document.removeEventListener('click', onDocClickForMenu, true);
+  }
+
+  function onDocClickForMenu(e) {
+    if (fillMenu && !fillMenu.contains(e.target) && !e.target.hasAttribute(SF_UI_ATTR)) closeFillMenu();
+  }
+
+  // Inline menu offering Name / Address / All / Clear, scoped to the clicked form.
+  function showFillMenu(anchorBtn, scanResult) {
+    closeFillMenu();
+    fillMenu = document.createElement('div');
+    fillMenu.setAttribute(SF_UI_ATTR, '');
+    Object.assign(fillMenu.style, {
+      position: 'fixed', zIndex: '2147483647', background: '#ffffff', color: '#0f172a',
+      border: '1px solid #e2e8f0', borderRadius: '10px', boxShadow: '0 10px 25px rgba(0,0,0,0.22)',
+      padding: '6px', minWidth: '200px', fontFamily: 'system-ui, -apple-system, sans-serif', fontSize: '13px'
+    });
+
+    const header = document.createElement('div');
+    header.textContent = `${scanResult.fieldCount} field${scanResult.fieldCount === 1 ? '' : 's'} • ${scanResult.scopeName}`;
+    Object.assign(header.style, { fontSize: '11px', color: '#64748b', padding: '4px 8px 6px', fontWeight: '600' });
+    fillMenu.appendChild(header);
+
+    const items = [
+      { label: '👤  Fill name & contact', group: 'name' },
+      { label: '🏠  Fill address', group: 'address' },
+      { label: '✨  Fill all fields', group: null },
+      { label: '🧹  Clear fields', clear: true }
+    ];
+    items.forEach(it => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = it.label;
+      b.setAttribute(SF_UI_ATTR, '');
+      Object.assign(b.style, {
+        display: 'block', width: '100%', textAlign: 'left', border: 'none', background: 'transparent',
+        padding: '8px 10px', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', color: '#0f172a'
+      });
+      b.addEventListener('mouseenter', () => { b.style.background = '#f1f5f9'; });
+      b.addEventListener('mouseleave', () => { b.style.background = 'transparent'; });
+      b.addEventListener('click', (e) => { e.stopPropagation(); runMenuAction(it); });
+      fillMenu.appendChild(b);
+    });
+
+    document.body.appendChild(fillMenu);
+
+    // Position under the icon, kept on-screen.
+    const r = anchorBtn.getBoundingClientRect();
+    const m = fillMenu.getBoundingClientRect();
+    let top = r.bottom + 6;
+    let left = r.right - m.width;
+    if (left < 4) left = 4;
+    if (top + m.height > window.innerHeight - 4) top = Math.max(4, r.top - m.height - 6);
+    fillMenu.style.top = top + 'px';
+    fillMenu.style.left = left + 'px';
+
+    setTimeout(() => document.addEventListener('click', onDocClickForMenu, true), 0);
+  }
+
+  async function runMenuAction(it) {
+    let profileKey = 'au-personal';
+    try {
+      const s = await chrome.storage.local.get(['defaultProfile']);
+      if (s.defaultProfile) profileKey = s.defaultProfile;
+    } catch (_) {}
+
+    if (it.clear) {
+      showToast(clearDetected().message);
+    } else {
+      const res = await fillWithProfile(profileKey, {
+        categories: it.group ? FIELD_GROUPS[it.group] : null,
+        unique: true
+      });
+      showToast(res.filledCount
+        ? `Filled ${res.filledCount} field${res.filledCount === 1 ? '' : 's'} with unique test data`
+        : 'No matching fields in this form');
+    }
+    closeFillMenu();
+  }
+
+  function flashButton(btn, count) {
+    const ok = count > 0;
+    btn.textContent = ok ? '✓' : '∅';
+    btn.style.background = ok ? '#16a34a' : '#dc2626';
+    setTimeout(() => { btn.textContent = '✨'; btn.style.background = '#2563eb'; }, 1200);
+  }
+
+  function showToast(msg) {
+    if (!toastEl) {
+      toastEl = document.createElement('div');
+      toastEl.setAttribute(SF_UI_ATTR, '');
+      Object.assign(toastEl.style, {
+        position: 'fixed', bottom: '20px', right: '20px', zIndex: '2147483647',
+        background: '#0f172a', color: '#fff', padding: '10px 14px', borderRadius: '8px',
+        fontSize: '13px', fontFamily: 'system-ui, -apple-system, sans-serif',
+        boxShadow: '0 4px 12px rgba(0,0,0,0.3)', maxWidth: '280px', transition: 'opacity .2s'
+      });
+      document.body.appendChild(toastEl);
+    }
+    toastEl.textContent = msg;
+    toastEl.style.opacity = '1';
+    toastEl.style.display = 'block';
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { if (toastEl) toastEl.style.opacity = '0'; }, 3200);
+  }
+
+  function repositionButtons() {
+    formButtons.forEach(({ btn, target }) => {
+      if (!target.isConnected || !isVisible(target)) { btn.style.display = 'none'; return; }
+      const r = target.getBoundingClientRect();
+      btn.style.display = 'block';
+      btn.style.top = Math.max(4, r.top + 6) + 'px';
+      btn.style.left = Math.max(4, r.right - 34) + 'px';
+    });
+  }
+
+  function scheduleReposition() {
+    if (repositionScheduled) return;
+    repositionScheduled = true;
+    requestAnimationFrame(() => { repositionScheduled = false; repositionButtons(); });
+  }
+
+  function ensureScanButtons() {
+    const targets = getIconTargets();
+    // Drop buttons whose target is gone.
+    formButtons = formButtons.filter(({ btn, target }) => {
+      if (!targets.includes(target) || !target.isConnected) { btn.remove(); return false; }
+      return true;
+    });
+    // Add buttons for new targets.
+    targets.forEach(target => {
+      if (formButtons.some(fb => fb.target === target)) return;
+      const btn = createScanButton(target);
+      document.body.appendChild(btn);
+      formButtons.push({ btn, target });
+    });
+    repositionButtons();
+  }
+
+  function scheduleBuild() {
+    if (buildScheduled) return;
+    buildScheduled = true;
+    setTimeout(() => { buildScheduled = false; ensureScanButtons(); }, 300);
+  }
+
+  function initFormIcons() {
+    try {
+      const mo = new MutationObserver(scheduleBuild);
+      mo.observe(document.documentElement, { childList: true, subtree: true });
+      window.addEventListener('scroll', scheduleReposition, true); // capture = catch inner scroll
+      window.addEventListener('resize', scheduleReposition);
+      scheduleBuild();
+    } catch (e) {
+      console.warn('[SmartForm] Form icons init failed:', e);
+    }
+  }
+
+  // Listen for messages from popup / background
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg.action === 'scan') {
+      const result = scanForms();
+      sendResponse(result);
+      return true; // async ok but we are sync
+    }
+
+    if (msg.action === 'fillProfile') {
+      fillWithProfile(msg.profileKey || 'au-personal', msg.opts || {}).then(sendResponse);
+      return true; // async response
+    }
+
+    if (msg.action === 'fillWithMap') {
+      const result = fillWithValueMap(msg.valueMap);
+      sendResponse(result);
+      return true;
+    }
+
+    if (msg.action === 'getStatus') {
+      sendResponse({
+        hasFields: detectedFields.length > 0,
+        fieldCount: detectedFields.length,
+        lastScan: lastScanTime
+      });
+      return true;
+    }
+
+    if (msg.action === 'clearFields') {
+      sendResponse(clearDetected());
+      return true;
+    }
+
+    // Unknown action
+    sendResponse({ success: false, message: 'Unknown action' });
+    return false;
+  });
+
+  // Add the per-form scan icons once the DOM is ready.
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initFormIcons, { once: true });
+  } else {
+    initFormIcons();
+  }
+})();

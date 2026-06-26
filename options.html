@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SmartForm Filler - Settings</title>
+  <style>
+    :root {
+      --primary: #2563eb;
+    }
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      max-width: 780px;
+      margin: 40px auto;
+      padding: 0 20px;
+      background: #f8fafc;
+      color: #0f172a;
+      line-height: 1.6;
+    }
+    @media (prefers-color-scheme: dark) {
+      body { background: #0f172a; color: #f1f5f9; }
+      .card { background: #1e293b; border-color: #334155; }
+      input, select, textarea, .model-card { background: #0f172a; border-color: #475569; color: #f1f5f9; }
+      .model-card:hover { background: #1e293b; }
+    }
+    h1 { font-size: 28px; margin-bottom: 8px; }
+    .subtitle { color: #64748b; margin-bottom: 24px; }
+
+    .card {
+      background: white;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 24px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    }
+
+    .section-header {
+      font-size: 15px;
+      font-weight: 700;
+      margin: 0 0 16px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid #e2e8f0;
+    }
+
+    /* Radio provider selector */
+    .provider-option {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 18px;
+      border: 2px solid #e2e8f0;
+      border-radius: 10px;
+      margin-bottom: 10px;
+      cursor: pointer;
+      transition: all 0.1s ease;
+    }
+    .provider-option:hover {
+      border-color: #94a3b8;
+    }
+    .provider-option.selected {
+      border-color: var(--primary);
+      background: #eff6ff;
+    }
+    .provider-option input[type="radio"] {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--primary);
+    }
+    .provider-option .label {
+      font-weight: 600;
+      font-size: 15px;
+    }
+    .provider-option .desc {
+      font-size: 13px;
+      color: #64748b;
+    }
+
+    label {
+      display: block;
+      font-weight: 600;
+      margin-bottom: 6px;
+      font-size: 14px;
+    }
+    input[type="text"], input[type="url"] {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      font-size: 14px;
+      margin-bottom: 16px;
+    }
+
+    .btn {
+      background: #2563eb;
+      color: white;
+      border: none;
+      padding: 10px 18px;
+      border-radius: 8px;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 14px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .btn:hover { background: #1e40af; }
+    .btn-secondary {
+      background: #f1f5f9;
+      color: #334155;
+      border: 1px solid #cbd5e1;
+    }
+    .btn-success {
+      background: #16a34a;
+    }
+    .btn-success:hover { background: #15803d; }
+
+    .row {
+      display: flex;
+      gap: 12px;
+      align-items: flex-end;
+      flex-wrap: wrap;
+    }
+    .row > div { flex: 1; min-width: 200px; }
+
+    .status {
+      margin-top: 12px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      display: inline-block;
+    }
+    .status.success { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
+    .status.error { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+    .status.info { background: #e0f2fe; color: #0369a1; border: 1px solid #7dd3fc; }
+
+    .hint {
+      font-size: 12.5px;
+      color: #64748b;
+      margin-top: -8px;
+      margin-bottom: 16px;
+    }
+
+    code {
+      background: #f1f5f9;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: ui-monospace, monospace;
+    }
+
+    /* Model selection modal */
+    #modelModal {
+      border: none;
+      border-radius: 16px;
+      padding: 0;
+      max-width: 920px;
+      width: 92%;
+      box-shadow: 0 25px 50px -12px rgb(0 0 0 / 0.4);
+    }
+    #modelModal::backdrop {
+      background: rgba(15, 23, 42, 0.6);
+      backdrop-filter: blur(4px);
+    }
+    .modal-header {
+      padding: 20px 24px;
+      border-bottom: 1px solid #e2e8f0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .modal-header h2 {
+      margin: 0;
+      font-size: 20px;
+    }
+    .modal-body {
+      padding: 24px;
+      max-height: 65vh;
+      overflow-y: auto;
+    }
+    .models-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 16px;
+    }
+    .model-card {
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 16px;
+      cursor: pointer;
+      transition: all 0.1s ease;
+      background: white;
+    }
+    .model-card:hover {
+      border-color: #2563eb;
+      box-shadow: 0 10px 15px -3px rgb(37 99 235 / 0.1);
+      transform: translateY(-1px);
+    }
+    .model-card.selected {
+      border-color: #2563eb;
+      background: #eff6ff;
+    }
+    .model-name {
+      font-weight: 700;
+      font-size: 15px;
+      margin-bottom: 4px;
+      color: #0f172a;
+    }
+    .model-desc {
+      font-size: 13px;
+      color: #475569;
+      line-height: 1.4;
+      margin-bottom: 12px;
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .model-meta {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      color: #64748b;
+    }
+    .model-meta .context {
+      background: #f1f5f9;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-weight: 500;
+    }
+    .model-meta .pricing {
+      font-family: ui-monospace, monospace;
+      font-size: 11.5px;
+    }
+
+    /* Model filter toolbar */
+    .model-toolbar {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+    .model-toolbar .search-wrap { flex: 1 1 240px; min-width: 200px; }
+    .model-toolbar input[type="text"] {
+      width: 100%;
+      margin-bottom: 0;
+      padding: 9px 12px;
+    }
+    .seg {
+      display: inline-flex;
+      background: #f1f5f9;
+      border: 1px solid #cbd5e1;
+      border-radius: 999px;
+      padding: 3px;
+      gap: 2px;
+    }
+    .seg button {
+      border: none;
+      background: transparent;
+      color: #475569;
+      font-size: 12.5px;
+      font-weight: 600;
+      padding: 6px 12px;
+      border-radius: 999px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.12s ease;
+    }
+    .seg button:hover { color: #0f172a; }
+    .seg button.active {
+      background: var(--primary);
+      color: #fff;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+    }
+    .models-count {
+      font-size: 12.5px;
+      color: #64748b;
+      margin-bottom: 12px;
+    }
+
+    /* Recommended / free badges + promoted cards */
+    .model-card-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 8px;
+    }
+    .model-badges {
+      display: flex;
+      gap: 6px;
+      flex-shrink: 0;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .badge {
+      font-size: 10.5px;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 999px;
+      white-space: nowrap;
+    }
+    .badge.star { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+    .badge.free { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
+    .rec-reason {
+      font-size: 12px;
+      color: #b45309;
+      font-weight: 600;
+      margin: 2px 0 10px;
+      padding-left: 18px;
+    }
+    .rec-reason li { line-height: 1.4; }
+    .model-card.recommended {
+      border: 2px solid #f59e0b;
+      box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.12);
+      background: linear-gradient(180deg, #fffbeb 0%, #ffffff 65%);
+    }
+    .model-card.recommended:hover {
+      border-color: #d97706;
+      box-shadow: 0 10px 15px -3px rgba(245, 158, 11, 0.25);
+    }
+    .model-card.recommended.selected {
+      border-color: #2563eb;
+      background: #eff6ff;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      .seg { background: #0f172a; border-color: #475569; }
+      .seg button { color: #94a3b8; }
+      .seg button:hover { color: #f1f5f9; }
+      .model-card.recommended {
+        background: linear-gradient(180deg, rgba(245,158,11,0.14) 0%, #1e293b 65%);
+        border-color: #f59e0b;
+      }
+      .model-card.recommended.selected { background: #1e293b; border-color: #2563eb; }
+      .badge.star { background: rgba(245,158,11,0.2); color: #fcd34d; border-color: #b45309; }
+      .badge.free { background: rgba(22,163,74,0.2); color: #86efac; border-color: #15803d; }
+      .rec-reason { color: #fcd34d; }
+    }
+
+    .current-model {
+      background: #f1f5f9;
+      padding: 12px 16px;
+      border-radius: 8px;
+      margin-top: 12px;
+      font-size: 13px;
+    }
+
+    /* Selected-model card (reuses .model-card styling) */
+    .current-model-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+    }
+    .current-model-card { max-width: 380px; }
+  </style>
+</head>
+<body>
+  <h1>SmartForm Filler Settings</h1>
+  <p class="subtitle">Choose your AI provider and configure models for intelligent form filling.</p>
+
+  <!-- Provider Selection -->
+  <div class="card">
+    <div class="section-header">🤖 AI Provider</div>
+
+    <label class="provider-option" id="provider-ollama-label">
+      <input type="radio" name="provider" value="ollama" id="provider-ollama">
+      <div>
+        <div class="label">Ollama (Local)</div>
+        <div class="desc">Run models locally on your machine. Private &amp; free after setup.</div>
+      </div>
+    </label>
+
+    <label class="provider-option" id="provider-openrouter-label">
+      <input type="radio" name="provider" value="openrouter" id="provider-openrouter">
+      <div>
+        <div class="label">OpenRouter (Cloud)</div>
+        <div class="desc">Access hundreds of models via API. Requires account + credits or API key.</div>
+      </div>
+    </label>
+  </div>
+
+  <!-- Ollama Settings -->
+  <div id="ollamaSettings" class="card" style="display: none;">
+    <div class="section-header">🦙 Ollama Configuration</div>
+
+    <label for="ollamaUrl">Ollama API Endpoint</label>
+    <input type="url" id="ollamaUrl" value="http://localhost:11434">
+
+    <label for="ollamaModel">Default Model</label>
+    <input type="text" id="ollamaModel" value="llama3.1:latest" placeholder="llama3.1:latest">
+
+    <p class="hint">Recommended: <code>llama3.1</code>, <code>qwen2.5-coder</code>, <code>gemma2</code>, <code>phi4</code></p>
+
+    <div class="row">
+      <button id="btnTestOllama" class="btn">Test Connection</button>
+      <button id="btnSaveOllama" class="btn btn-secondary">Save Ollama Settings</button>
+    </div>
+    <div id="ollamaStatus" class="status" style="display:none;"></div>
+  </div>
+
+  <!-- OpenRouter Settings -->
+  <div id="openrouterSettings" class="card" style="display: none;">
+    <div class="section-header">🌐 OpenRouter Configuration</div>
+
+    <div id="openrouterStatus" class="status info" style="margin-bottom: 16px; display: none;">
+      Not connected
+    </div>
+
+    <div class="row" style="margin-bottom: 12px;">
+      <button id="btnConnectOpenRouter" class="btn">
+        🔐 Authenticate with OpenRouter (OAuth2 PKCE)
+      </button>
+      <button id="btnBrowseModels" class="btn btn-secondary">
+        📋 Browse &amp; Select Model
+      </button>
+    </div>
+
+    <!-- Currently selected model, shown as a card right at the Browse button -->
+    <div id="currentOpenRouterModel" style="margin-bottom: 16px;">
+      <div class="current-model-label">Selected model</div>
+      <div id="currentModelCard" class="current-model-card">qwen/qwen3-coder</div>
+    </div>
+
+    <div style="margin-bottom: 16px;">
+      <label for="openrouterApiKey">API Key (fallback / manual paste)</label>
+      <div class="row">
+        <input type="text" id="openrouterApiKey" placeholder="sk-or-..." style="margin-bottom: 0;">
+        <button id="btnSaveOpenRouterKey" class="btn btn-secondary" style="white-space: nowrap;">Save Key</button>
+      </div>
+      <p class="hint">You can also create keys manually at <a href="https://openrouter.ai/keys" target="_blank">openrouter.ai/keys</a></p>
+    </div>
+
+  </div>
+
+  <!-- Behavior -->
+  <div class="card">
+    <div class="section-header">⚙️ General Behavior</div>
+
+    <label for="defaultProfile">Default Profile for Quick Fill</label>
+    <select id="defaultProfile" style="width: 100%; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 8px; margin-bottom: 16px;">
+      <option value="au-personal">AU Personal (Mansfield/Brisbane)</option>
+      <option value="au-business">AU Business / Company</option>
+      <option value="us-test">US Test User</option>
+      <option value="minimal">Minimal / Edge Case</option>
+    </select>
+
+    <button id="btnSaveBehavior" class="btn">Save Behavior Settings</button>
+  </div>
+
+  <p style="text-align:center; color:#64748b; font-size:12px; margin-top: 32px;">
+    SmartForm Filler v0.9.1 • Supports both local Ollama and OpenRouter
+  </p>
+
+  <!-- Model Selection Modal -->
+  <dialog id="modelModal">
+    <div class="modal-header">
+      <h2>Select OpenRouter Model</h2>
+      <button id="btnCloseModal" class="btn btn-secondary" style="padding: 6px 14px;">Close</button>
+    </div>
+    <div class="modal-body">
+      <div id="modelsLoading" style="text-align:center; padding: 40px 0; color:#64748b;">
+        Loading available models from OpenRouter...
+      </div>
+
+      <div id="modelToolbar" class="model-toolbar" style="display: none;">
+        <div class="search-wrap">
+          <input type="text" id="modelSearch" list="modelSuggestions" autocomplete="off"
+                 placeholder="🔍 Filter by name or description…">
+          <datalist id="modelSuggestions"></datalist>
+        </div>
+        <div class="seg" id="segCost" role="group" aria-label="Filter by cost">
+          <button type="button" data-cost="all" class="active">All</button>
+          <button type="button" data-cost="free">Free</button>
+          <button type="button" data-cost="paid">Paid</button>
+        </div>
+        <div class="seg" id="segQuality" role="group" aria-label="Filter by recommendation">
+          <button type="button" data-quality="all" class="active">All</button>
+          <button type="button" data-quality="recommended">★ Recommended</button>
+        </div>
+      </div>
+
+      <div id="modelsCount" class="models-count" style="display: none;"></div>
+      <div id="modelsGrid" class="models-grid" style="display: none;"></div>
+      <div id="modelsEmpty" class="status info" style="display: none; margin-top: 16px;">
+        No models match your filters.
+      </div>
+      <div id="modelsError" class="status error" style="display: none; margin-top: 20px;"></div>
+    </div>
+  </dialog>
+
+  <script src="recommendations.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

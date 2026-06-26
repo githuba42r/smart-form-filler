@@ -1,0 +1,50 @@
+{
+  "manifest_version": 3,
+  "name": "SmartForm Filler - Dev AI Assistant",
+  "short_name": "SmartForm AI",
+  "version": "1.0.0",
+  "description": "Intelligent browser extension for developers. AI-powered (Ollama/local LLM) or heuristic scanning of forms on dev/staging sites. One-click prefill with realistic AU-focused test data for address, signup, account creation forms etc.",
+  "author": "Phil (custom for dev workflow)",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "scripting",
+    "identity"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "SmartForm Filler - Scan & Prefill Forms"
+  },
+  "options_page": "options.html",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "commands": {
+    "smart-fill-heuristic": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+F",
+        "mac": "Command+Shift+F"
+      },
+      "description": "Quick heuristic smart fill on current page"
+    }
+  }
+}

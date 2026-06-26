@@ -1,0 +1,13 @@
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Node (only used for local tooling, never shipped)
+node_modules/
+package-lock.json
+
+# Build / packaging artifacts
+*.zip
+dist/
