@@ -4,16 +4,17 @@
 
 **Goal:** Replace the four hardcoded fill profiles with storage-backed, country-aware *generator* profiles that produce randomized, country-coherent test data and let the user control which fields each fill completes (persistently per profile and transiently per fill).
 
-**Architecture:** Two new classic global-namespaced scripts — `vendor/address-schemas.js` (`window.SFAddress`, a static port of the address-module's framework-free schema files) and `formdata.js` (`window.SFFormData`, locale pools + `generatePerson` generator + profile schema/seed + policy gate). `content.js`/`popup.js`/`options.js` consume those globals; `background.js` seeds `chrome.storage.local`. No build step, no runtime dependency on the address-module.
+**Architecture:** All pure logic lives in two new classic global-namespaced scripts so it is loadable in jsdom and shared by every consumer — `vendor/address-schemas.js` (`window.SFAddress`, a static port of the address-module's framework-free schema files) and `formdata.js` (`window.SFFormData`: field vocabulary, generator, pins, policy gate, value resolution, profile data-ops, seed). DOM helpers shared across surfaces live in `profile-ui.js` (`window.SFProfileUI`). `content.js`/`popup.js`/`options.js` are thin consumers of those globals; `background.js` seeds `chrome.storage.local`. No build step, no runtime dependency on the address-module.
 
 **Tech Stack:** Vanilla ES (classic scripts, `window.*` globals — the existing `recommendations.js` pattern), Chrome MV3 (`chrome.storage.local`), jsdom + Node for tests.
 
 ## Global Constraints
 
 - **No build step.** All shipped scripts are plain classic scripts assigning to a `window.*` namespace; no `import`/`export`/bundler. (Matches `recommendations.js`.)
+- **No duplicated production logic.** Every pure function and DOM helper has exactly one definition, in a loadable module (`formdata.js`, `profile-ui.js`, or `vendor/address-schemas.js`). Tests load the real module — never a re-typed copy. (The sole sanctioned duplication is the seed array in Task 7, which a module worker cannot share; it is protected by a drift-guard test.)
 - **No runtime dependency on `~/src/vue/address-module`.** Vendored files are a hand-refreshable static copy; record provenance in a header comment.
-- **Do not alter** the existing detection / visibility / section-icon / combobox-vue-select / Google-Places / cascade-pass logic in `content.js`. Only the profile-source, policy-gate, and menu code change.
-- **Canonical field vocabulary:** `firstname, lastname, fullname, username, email, phone, street1, street2, city, state, zip, country, business, password, dob, genericText`. Engine-category mapping is fixed (see Task 3).
+- **Do not alter** the existing detection / visibility / section-icon / combobox-vue-select / Google-Places / cascade-pass logic in `content.js`. Only the profile-source, value-resolution, and menu code change.
+- **Canonical field vocabulary:** `firstname, lastname, fullname, username, email, phone, street1, street2, city, state, zip, country, business, password, dob, genericText`. Engine-category mapping is fixed (Task 3).
 - **Field groups:** `name` (firstname, lastname, fullname, username), `contact` (email, phone), `address` (street1, street2, city, state, zip, country), `account` (password, dob), `misc` (business, genericText).
 - **Profiles ship AU + US data pools.** Other countries get correct address *schema* (labels/required) + a generic data pool.
 - **No AI** anywhere in this plan (deferred to spec #3).
@@ -26,32 +27,31 @@
 
 | File | Responsibility |
 |------|----------------|
-| `package.json` (new) | Declares the `jsdom` dev dependency + `test` script. |
-| `test/harness.js` (new) | Loads classic scripts into a jsdom window; tiny assert helpers. |
-| `test/*.js` (new) | One test file per task (logic-level). |
+| `package.json` (new) | Declares `jsdom` dev dependency + `test` script. |
+| `test/harness.js` (new) | Loads classic scripts into a jsdom window; assert helpers. |
+| `test/helpers/chrome-mock.js` (new) | Reusable fake `chrome.storage.local` for tests (test infra, not production logic). |
+| `test/*.test.js` (new) | One test file per task; loads real modules. |
 | `vendor/address-schemas.js` (new) | `window.SFAddress`: schemas + field-config + zip validation + flag emoji + country list. Static port. |
-| `formdata.js` (new) | `window.SFFormData`: field groups, engine mapping, locale pools, `generatePerson`, pins, policy gate, profile seed/defaults. |
-| `content.js` (modify) | `fillWithProfile` rewired to storage+generator+policy gate; form-icon menu rebuilt. |
-| `popup.html`/`popup.js` (modify) | Profile dropdown sourced from storage. |
-| `options.html`/`options.js` (modify) | Profile-manager CRUD + dynamic per-country address sub-form. |
+| `formdata.js` (new) | `window.SFFormData`: field groups, engine mapping, locale pools, `generatePerson`, pins, policy gate, `applyPolicy`/`resolveValues`, profile data-ops, seed/version. |
+| `profile-ui.js` (new) | `window.SFProfileUI`: shared DOM builders (`buildMenu`, `populateProfileSelect`, `renderAddressFields`). |
+| `content.js` (modify) | `fillWithProfile` rewired to storage + `SFFormData.resolveValues`; form-icon menu via `SFProfileUI.buildMenu`. |
+| `popup.html`/`popup.js` (modify) | Profile dropdown via `SFProfileUI.populateProfileSelect`. |
+| `options.html`/`options.js` (modify) | Profile-manager CRUD via `SFFormData` data-ops + dynamic address via `SFProfileUI.renderAddressFields`. |
 | `background.js` (modify) | Seed/migrate `profiles` on install/upgrade. |
-| `manifest.json` (modify) | Register `vendor/address-schemas.js` + `formdata.js` content scripts; version bump. |
+| `seed-data.node.js` (new) | CommonJS source of truth for seed logic, requireable by tests. |
+| `manifest.json` (modify) | Register `vendor/address-schemas.js` + `formdata.js` + `profile-ui.js` content scripts before `content.js`; version bump. |
 
 ---
 
 ## Task 1: Test harness & dev tooling
 
 **Files:**
-- Create: `package.json`
-- Create: `test/harness.js`
-- Test: `test/harness.selftest.js`
+- Create: `package.json`, `test/harness.js`, `test/harness.selftest.js`
 
 **Interfaces:**
-- Produces: `require('./harness')` → `{ loadGlobals(files, html?) → window, assert(cond,msg), eq(actual,expected,msg), ok(cond,msg), section(name), done(name) }`. `loadGlobals` reads each repo-relative file and evaluates it inside one jsdom window's VM context (so `window.Foo = …` assignments land on the returned `window`).
+- Produces: `require('./harness')` → `{ loadGlobals(files, html?) → window, assert(cond,msg), ok(cond,msg), eq(actual,expected,msg), section(name), done(name) }`. `loadGlobals` reads each repo-relative file and evaluates it inside one jsdom window's VM context (so `window.Foo = …` assignments land on the returned `window`).
 
-- [ ] **Step 1: Write the failing self-test**
-
-Create `test/harness.selftest.js`:
+- [ ] **Step 1: Write the failing self-test** — create `test/harness.selftest.js`:
 
 ```js
 const { loadGlobals, eq, ok, done } = require('./harness');
@@ -61,12 +61,9 @@ eq(typeof win.Node, 'function', 'window has DOM globals');
 done('harness.selftest');
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 2: Run it to verify it fails** — `node test/harness.selftest.js` → FAIL `Cannot find module './harness'`.
 
-Run: `node test/harness.selftest.js`
-Expected: FAIL — `Cannot find module './harness'`.
-
-- [ ] **Step 3: Create `package.json`**
+- [ ] **Step 3: Create `package.json`:**
 
 ```json
 {
@@ -75,38 +72,32 @@ Expected: FAIL — `Cannot find module './harness'`.
   "private": true,
   "description": "Dev-only tooling/tests for the SmartForm Filler extension (not shipped).",
   "scripts": {
-    "test": "for f in test/*.js; do echo \"== $f ==\"; node \"$f\" || exit 1; done"
+    "test": "for f in test/*.test.js test/harness.selftest.js; do echo \"== $f ==\"; node \"$f\" || exit 1; done"
   },
-  "devDependencies": {
-    "jsdom": "^24.0.0"
-  }
+  "devDependencies": { "jsdom": "^24.0.0" }
 }
 ```
 
-- [ ] **Step 4: Create `test/harness.js`**
+- [ ] **Step 4: Create `test/harness.js`:**
 
 ```js
 const { JSDOM } = require('jsdom');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
-
 const ROOT = path.resolve(__dirname, '..');
 
 function loadGlobals(files, html = '<!DOCTYPE html><body></body>') {
   const dom = new JSDOM(html, { runScripts: 'outside-only', pretendToBeVisual: true });
   const ctx = dom.getInternalVMContext();
   for (const f of files) {
-    const code = fs.readFileSync(path.join(ROOT, f), 'utf8');
-    vm.runInContext(code, ctx, { filename: f });
+    vm.runInContext(fs.readFileSync(path.join(ROOT, f), 'utf8'), ctx, { filename: f });
   }
   return dom.window;
 }
 
 let passed = 0, failed = 0;
-function assert(cond, msg) {
-  if (cond) { passed++; } else { failed++; console.error('  ✗ ' + msg); }
-}
+function assert(cond, msg) { if (cond) passed++; else { failed++; console.error('  ✗ ' + msg); } }
 const ok = assert;
 function eq(actual, expected, msg) {
   assert(JSON.stringify(actual) === JSON.stringify(expected),
@@ -120,12 +111,9 @@ function done(name) {
 module.exports = { loadGlobals, assert, ok, eq, section, done };
 ```
 
-- [ ] **Step 5: Install jsdom and run the self-test**
+- [ ] **Step 5: Install jsdom and run** — `npm install >/dev/null 2>&1 && node test/harness.selftest.js` → `✓ harness.selftest: 2 passed, 0 failed`.
 
-Run: `npm install >/dev/null 2>&1 && node test/harness.selftest.js`
-Expected: `✓ harness.selftest: 2 passed, 0 failed` (exit 0).
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Commit:**
 
 ```bash
 git add package.json test/harness.js test/harness.selftest.js .gitignore
@@ -137,29 +125,17 @@ git commit -m "test: add jsdom test harness for extension globals"
 ## Task 2: Vendor the address schema → `window.SFAddress`
 
 **Files:**
-- Create: `vendor/address-schemas.js`
-- Test: `test/address-schemas.test.js`
+- Create: `vendor/address-schemas.js`, `test/address-schemas.test.js`
 
 **Interfaces:**
-- Produces `window.SFAddress` with:
-  - `ADDRESS_SCHEMAS` (object), `DEFAULT_SCHEMA` (object)
-  - `getSchema(country) → schema`
-  - `getFieldConfig(country) → { order:string[], fields:{ street1,street2,city,state,zip: {show,required,label, …} } }`
-  - `validateZip(zip, country) → { valid:boolean, example?:string }`
-  - `getZipHint(country) → string|null`
-  - `countryCodeToFlagEmoji(code) → string`
-  - `listCountries() → Array<{ code, name, flag, label }>` sorted by `name`, `label` = `"🇦🇺 Australia"`.
+- Produces `window.SFAddress`: `ADDRESS_SCHEMAS`, `DEFAULT_SCHEMA`, `getSchema(country)`, `getFieldConfig(country) → { order:string[], fields:{ street1,street2,city,state,zip: {show,required,label,…} } }`, `validateZip(zip,country) → {valid, example?}`, `getZipHint(country) → string|null`, `countryCodeToFlagEmoji(code) → string`, `listCountries() → Array<{code,name,flag,label}>` sorted by `name`, `label` = `"🇦🇺 Australia"`.
 
-- [ ] **Step 1: Write the failing test**
-
-Create `test/address-schemas.test.js`:
+- [ ] **Step 1: Write the failing test** — create `test/address-schemas.test.js`:
 
 ```js
 const { loadGlobals, eq, ok, done } = require('./harness');
-const win = loadGlobals(['vendor/address-schemas.js']);
-const A = win.SFAddress;
+const A = loadGlobals(['vendor/address-schemas.js']).SFAddress;
 
-// AU labels + required + order
 const au = A.getFieldConfig('AU');
 eq(au.fields.state.label, 'State/Territory', 'AU state label override');
 eq(au.fields.city.label, 'Suburb', 'AU locality label');
@@ -167,44 +143,32 @@ eq(au.fields.zip.label, 'Postcode', 'AU zip label');
 ok(au.fields.zip.required && au.fields.state.required, 'AU zip+state required');
 eq(au.order, ['street', 'city', 'state', 'zip'], 'AU field order from fmt');
 
-// US differs
 const us = A.getFieldConfig('US');
 eq(us.fields.city.label, 'City', 'US locality label');
 eq(us.fields.zip.label, 'ZIP Code', 'US zip label');
 
-// zip validation
 ok(A.validateZip('4000', 'AU').valid, 'AU 4000 valid');
 ok(!A.validateZip('ABCD', 'AU').valid, 'AU ABCD invalid');
 ok(A.validateZip('94114', 'US').valid, 'US 94114 valid');
 
-// flag + country list
 eq(A.countryCodeToFlagEmoji('AU'), '\u{1F1E6}\u{1F1FA}', 'AU flag emoji');
 const list = A.listCountries();
 ok(list.length >= 30, 'at least 30 countries ported');
 ok(list.some(c => c.code === 'AU' && c.label.indexOf('Australia') !== -1), 'AU in list with name');
-
-// unknown country falls back to default schema (renders something)
 ok(A.getFieldConfig('ZZ').fields.street1.show, 'unknown country still shows street');
-
 done('address-schemas');
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 2: Run it to verify it fails** — `node test/address-schemas.test.js` → FAIL (`SFAddress` undefined).
 
-Run: `node test/address-schemas.test.js`
-Expected: FAIL — `Cannot read properties of undefined (reading 'getFieldConfig')` (no `SFAddress`).
+- [ ] **Step 3: Create `vendor/address-schemas.js` (port).** Build one IIFE assigning `window.SFAddress`. **Port procedure:**
+  1. Copy the **entire** `ADDRESS_SCHEMAS` and `DEFAULT_SCHEMA` object literals **verbatim** from `~/src/vue/address-module/src/utils/addressSchemas.js` (all 35 countries); change `export const` → `const`.
+  2. Paste the provider logic from `addressSchemaProvider.js` **verbatim**, deleting its `import …` line and every `export` keyword.
+  3. Paste `countryCodeToFlagEmoji` **verbatim** from `countryCodeFormatter.js` (omit the two phone helpers).
+  4. Add the new `listCountries()` helper.
+  5. Expose the public surface on `root.SFAddress`.
 
-- [ ] **Step 3: Create `vendor/address-schemas.js` (port)**
-
-Build the file in this exact order inside one IIFE. **Port procedure:**
-
-1. Copy the **entire** `ADDRESS_SCHEMAS` object literal and the `DEFAULT_SCHEMA` object literal **verbatim** from `~/src/vue/address-module/src/utils/addressSchemas.js` (all 35 countries). Remove the two `export const` keywords — declare them as plain `const`.
-2. Paste the provider logic from `addressSchemaProvider.js` **verbatim**, but: delete its `import { ADDRESS_SCHEMAS, DEFAULT_SCHEMA } from './addressSchemas.js'` line (they're now local), and delete every `export` keyword (declare plain `function`).
-3. Paste `countryCodeToFlagEmoji` **verbatim** from `countryCodeFormatter.js` (omit the two phone helpers — not needed).
-4. Add the new `listCountries()` helper (below).
-5. Expose the public surface on `root.SFAddress`.
-
-The wrapper skeleton (fill the marked regions with the verbatim copies):
+Skeleton (fill the marked regions with verbatim copies):
 
 ```js
 // vendor/address-schemas.js
@@ -215,32 +179,25 @@ The wrapper skeleton (fill the marked regions with the verbatim copies):
 ;(function (root) {
   'use strict';
 
-  // ----- BEGIN verbatim copy from addressSchemas.js (drop `export`) -----
+  // ----- verbatim from addressSchemas.js (drop `export`) -----
   const DEFAULT_SCHEMA = {
-    name: 'Default',
-    fmt: '%N%n%O%n%A%n%C',
-    require: 'AC',
-    state_name_type: 'province',
-    locality_name_type: 'city',
-    zip_name_type: 'postal'
+    name: 'Default', fmt: '%N%n%O%n%A%n%C', require: 'AC',
+    state_name_type: 'province', locality_name_type: 'city', zip_name_type: 'postal'
   };
   const ADDRESS_SCHEMAS = {
     AU: { name: 'Australia', fmt: '%O%n%N%n%A%n%C %S %Z', require: 'ACSZ',
           zip: '\\d{4}', zip_ex: '4113', state_name_type: 'state',
-          state_label: 'State/Territory', locality_name_type: 'suburb',
-          zip_name_type: 'postcode' },
+          state_label: 'State/Territory', locality_name_type: 'suburb', zip_name_type: 'postcode' },
     US: { name: 'United States', fmt: '%N%n%O%n%A%n%C, %S %Z', require: 'ACSZ',
           zip: '\\d{5}([ \\-]\\d{4})?', zip_ex: '62704', state_name_type: 'state',
-          locality_name_type: 'city', zip_name_type: 'zip' },
-    // … paste the remaining 33 countries (CA, GB, NZ, JP, …) verbatim …
+          locality_name_type: 'city', zip_name_type: 'zip' }
+    // … paste the remaining 33 countries (CA, GB, NZ, JP, …) byte-for-byte …
   };
-  // ----- END verbatim copy -----
 
-  // ----- BEGIN verbatim copy from addressSchemaProvider.js -----
-  // (drop the `import` line and every `export` keyword)
-  const STATE_LABELS = { state:'State', province:'Province', prefecture:'Prefecture',
-    county:'County', region:'Region', do_si:'Do/Si', area:'Area', district:'District',
-    department:'Department', emirate:'Emirate', island:'Island', oblast:'Oblast', parish:'Parish' };
+  // ----- verbatim from addressSchemaProvider.js (drop `import` + `export`) -----
+  const STATE_LABELS = { state:'State', province:'Province', prefecture:'Prefecture', county:'County',
+    region:'Region', do_si:'Do/Si', area:'Area', district:'District', department:'Department',
+    emirate:'Emirate', island:'Island', oblast:'Oblast', parish:'Parish' };
   const LOCALITY_LABELS = { city:'City', suburb:'Suburb', post_town:'Town/City', district:'District' };
   const ZIP_LABELS = { zip:'ZIP Code', postal:'Postal Code', postcode:'Postcode', pin:'PIN Code', eircode:'Eircode' };
   function normaliseCountryCode(c){ return (c||'').toString().trim().toUpperCase(); }
@@ -271,17 +228,14 @@ The wrapper skeleton (fill the marked regions with the verbatim copies):
   function validateZip(zip, c){
     const value = (zip||'').toString().trim(); if (!value) return { valid:true };
     const schema = getSchema(c); if (!schema.zip) return { valid:true };
-    const valid = new RegExp('^(?:'+schema.zip+')$').test(value);
-    return { valid, example: schema.zip_ex || null };
+    return { valid: new RegExp('^(?:'+schema.zip+')$').test(value), example: schema.zip_ex || null };
   }
-  function getZipHint(c){ const schema = getSchema(c); return schema.zip_ex ? `e.g. ${schema.zip_ex}` : null; }
-  // ----- END verbatim copy -----
+  function getZipHint(c){ const s = getSchema(c); return s.zip_ex ? `e.g. ${s.zip_ex}` : null; }
 
   // ----- verbatim from countryCodeFormatter.js -----
   function countryCodeToFlagEmoji(countryCode){
     if (!countryCode || typeof countryCode !== 'string' || countryCode.length !== 2) return '';
-    const codePoints = countryCode.toUpperCase().split('').map(ch => 127397 + ch.charCodeAt());
-    return String.fromCodePoint(...codePoints);
+    return String.fromCodePoint(...countryCode.toUpperCase().split('').map(ch => 127397 + ch.charCodeAt()));
   }
 
   // ----- new helper for the options country picker -----
@@ -298,14 +252,9 @@ The wrapper skeleton (fill the marked regions with the verbatim copies):
 })(typeof window !== 'undefined' ? window : globalThis);
 ```
 
-> When pasting the remaining 33 countries, keep them byte-for-byte from the source so the regexes stay valid.
+- [ ] **Step 4: Run test to verify it passes** — `node --check vendor/address-schemas.js && node test/address-schemas.test.js` → PASS.
 
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `node --check vendor/address-schemas.js && node test/address-schemas.test.js`
-Expected: `node --check` silent (valid syntax); test prints `✓ address-schemas: … 0 failed`.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit:**
 
 ```bash
 git add vendor/address-schemas.js test/address-schemas.test.js
@@ -316,55 +265,38 @@ git commit -m "feat: vendor address schema model as window.SFAddress"
 
 ## Task 3: `formdata.js` — field groups, vocabulary & engine mapping
 
-**Files:**
-- Create: `formdata.js`
-- Test: `test/formdata-groups.test.js`
+**Files:** Create `formdata.js`, `test/formdata-groups.test.js`
 
-**Interfaces:**
-- Produces (initial slice of) `window.SFFormData`:
-  - `FIELD_GROUPS` → `{ name:[…], contact:[…], address:[…], account:[…], misc:[…] }` (canonical keys).
-  - `CANONICAL_TO_ENGINE` → map canonical→engine-category string.
-  - `ENGINE_TO_CANONICAL` → reverse map.
-  - `groupForField(canonicalKey) → 'name'|'contact'|'address'|'account'|'misc'|null`.
-  - `toEngineValues(canonicalValueMap) → engineCategoryValueMap`.
+**Interfaces:** Produces (initial slice of) `window.SFFormData`: `FIELD_GROUPS`, `CANONICAL_TO_ENGINE`, `ENGINE_TO_CANONICAL`, `groupForField(canonicalKey) → group|null`, `toEngineValues(canonicalMap) → engineMap`.
 
-- [ ] **Step 1: Write the failing test**
-
-Create `test/formdata-groups.test.js`:
+- [ ] **Step 1: Write the failing test** — create `test/formdata-groups.test.js`:
 
 ```js
 const { loadGlobals, eq, ok, done } = require('./harness');
-const win = loadGlobals(['vendor/address-schemas.js', 'formdata.js']);
-const F = win.SFFormData;
+const F = loadGlobals(['vendor/address-schemas.js', 'formdata.js']).SFFormData;
 
 eq(F.groupForField('email'), 'contact', 'email is contact');
 eq(F.groupForField('street1'), 'address', 'street1 is address');
 eq(F.groupForField('firstname'), 'name', 'firstname is name');
 eq(F.groupForField('business'), 'misc', 'business is misc');
-eq(F.groupForField('nope'), null, 'unknown key -> null');
-
+eq(F.groupForField('nope'), null, 'unknown -> null');
 eq(F.CANONICAL_TO_ENGINE.street1, 'address1', 'street1 -> address1');
 eq(F.CANONICAL_TO_ENGINE.zip, 'postcode', 'zip -> postcode');
 eq(F.CANONICAL_TO_ENGINE.business, 'company', 'business -> company');
 eq(F.ENGINE_TO_CANONICAL.postcode, 'zip', 'postcode -> zip (reverse)');
-
 const eng = F.toEngineValues({ street1: '17 Main St', zip: '4000', email: 'a@b.co' });
-eq(eng.address1, '17 Main St', 'toEngineValues maps street1');
-eq(eng.postcode, '4000', 'toEngineValues maps zip');
-eq(eng.email, 'a@b.co', 'toEngineValues passes email');
-
+eq(eng.address1, '17 Main St', 'maps street1');
+eq(eng.postcode, '4000', 'maps zip');
+eq(eng.email, 'a@b.co', 'passes email');
 done('formdata-groups');
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 2: Run it to verify it fails** — `node test/formdata-groups.test.js` → FAIL (`SFFormData` undefined).
 
-Run: `node test/formdata-groups.test.js`
-Expected: FAIL — `SFFormData` undefined.
-
-- [ ] **Step 3: Create `formdata.js` (this slice)**
+- [ ] **Step 3: Create `formdata.js` (this slice):**
 
 ```js
-// formdata.js — window.SFFormData: profile generator, field groups, policy gate.
+// formdata.js — window.SFFormData: profile generator, field groups, policy gate, data-ops.
 // Classic global script (no import/export). Loads after vendor/address-schemas.js.
 ;(function (root) {
   'use strict';
@@ -376,46 +308,31 @@ Expected: FAIL — `SFFormData` undefined.
     account: ['password', 'dob'],
     misc:    ['business', 'genericText']
   };
-
   const CANONICAL_TO_ENGINE = {
     firstname:'firstName', lastname:'lastName', fullname:'fullName', username:'username',
     email:'email', phone:'phone',
     street1:'address1', street2:'address2', city:'city', state:'state', zip:'postcode', country:'country',
-    password:'password', dob:'dob',
-    business:'company', genericText:'genericText'
+    password:'password', dob:'dob', business:'company', genericText:'genericText'
   };
   const ENGINE_TO_CANONICAL = Object.keys(CANONICAL_TO_ENGINE)
     .reduce((acc, k) => { acc[CANONICAL_TO_ENGINE[k]] = k; return acc; }, {});
-
   const _GROUP_OF = (function () {
-    const m = {};
-    Object.keys(FIELD_GROUPS).forEach(g => FIELD_GROUPS[g].forEach(k => { m[k] = g; }));
-    return m;
+    const m = {}; Object.keys(FIELD_GROUPS).forEach(g => FIELD_GROUPS[g].forEach(k => { m[k] = g; })); return m;
   })();
   function groupForField(key) { return _GROUP_OF[key] || null; }
-
   function toEngineValues(map) {
     const out = {};
-    Object.keys(map || {}).forEach(k => {
-      const e = CANONICAL_TO_ENGINE[k];
-      if (e) out[e] = map[k];
-    });
+    Object.keys(map || {}).forEach(k => { const e = CANONICAL_TO_ENGINE[k]; if (e) out[e] = map[k]; });
     return out;
   }
 
-  root.SFFormData = {
-    FIELD_GROUPS, CANONICAL_TO_ENGINE, ENGINE_TO_CANONICAL,
-    groupForField, toEngineValues
-  };
+  root.SFFormData = { FIELD_GROUPS, CANONICAL_TO_ENGINE, ENGINE_TO_CANONICAL, groupForField, toEngineValues };
 })(typeof window !== 'undefined' ? window : globalThis);
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run test to verify it passes** — `node --check formdata.js && node test/formdata-groups.test.js` → PASS.
 
-Run: `node --check formdata.js && node test/formdata-groups.test.js`
-Expected: PASS — `✓ formdata-groups: … 0 failed`.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit:**
 
 ```bash
 git add formdata.js test/formdata-groups.test.js
@@ -426,63 +343,37 @@ git commit -m "feat: formdata field groups + canonical/engine mapping"
 
 ## Task 4: `formdata.js` — locale pools + `generatePerson` (seedable)
 
-**Files:**
-- Modify: `formdata.js`
-- Test: `test/formdata-generate.test.js`
+**Files:** Modify `formdata.js`; create `test/formdata-generate.test.js`
 
-**Interfaces:**
-- Consumes: `window.SFAddress.validateZip`, `getSchema`.
-- Produces, added to `window.SFFormData`:
-  - `LOCALES` → `{ AU:{…}, US:{…} }` (extensible).
-  - `generatePerson(profile, opts?) → canonicalValueMap` with **every** canonical key set. `opts.seed` (integer) makes output deterministic. Generated `zip` matches the country schema's `zip` regex; `state`/`city`/`zip` come from one coherent row. `email`/`username` derive from the generated name. Pins are **not** applied here (Task 5).
+**Interfaces:** Consumes `window.SFAddress.validateZip`. Adds to `window.SFFormData`: `LOCALES` (`{AU,US}`), `generatePerson(profile, opts?) → canonicalValueMap` with **every** canonical key set. `opts.seed` (int) → deterministic. Generated `zip` matches the country schema's `zip` regex; `state`/`city`/`zip` come from one coherent row; `email`/`username` derive from the name. Pins **not** applied here (Task 5).
 
-- [ ] **Step 1: Write the failing test**
-
-Create `test/formdata-generate.test.js`:
+- [ ] **Step 1: Write the failing test** — create `test/formdata-generate.test.js`:
 
 ```js
 const { loadGlobals, eq, ok, done } = require('./harness');
 const win = loadGlobals(['vendor/address-schemas.js', 'formdata.js']);
 const F = win.SFFormData, A = win.SFAddress;
-const profAU = { country: 'AU' }, profUS = { country: 'US' };
 
-// determinism
-const a1 = F.generatePerson(profAU, { seed: 42 });
-const a2 = F.generatePerson(profAU, { seed: 42 });
-eq(a1, a2, 'same seed -> identical output');
-ok(F.generatePerson(profAU, { seed: 1 }).email !== a1.email, 'different seed -> different output');
-
-// completeness
+const a1 = F.generatePerson({ country: 'AU' }, { seed: 42 });
+const a2 = F.generatePerson({ country: 'AU' }, { seed: 42 });
+eq(a1, a2, 'same seed -> identical');
+ok(F.generatePerson({ country: 'AU' }, { seed: 1 }).email !== a1.email, 'different seed -> different');
 ['firstname','lastname','username','email','phone','street1','city','state','zip','country','password','dob','business','genericText']
   .forEach(k => ok(a1[k] !== undefined && a1[k] !== '', `generated ${k} present`));
-
-// country coherence + zip validity
 eq(a1.country, 'AU', 'country preserved');
 ok(A.validateZip(a1.zip, 'AU').valid, 'AU zip matches schema regex');
-const us = F.generatePerson(profUS, { seed: 7 });
-ok(A.validateZip(us.zip, 'US').valid, 'US zip matches schema regex');
-
-// email derived from name
+ok(A.validateZip(F.generatePerson({ country: 'US' }, { seed: 7 }).zip, 'US').valid, 'US zip valid');
 ok(a1.email.toLowerCase().indexOf(a1.lastname.toLowerCase()) !== -1, 'email derived from last name');
-
-// unknown country still generates (generic pool)
 const zz = F.generatePerson({ country: 'ZZ' }, { seed: 3 });
 ok(zz.firstname && zz.street1, 'generic fallback still produces a person');
-
 done('formdata-generate');
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 2: Run it to verify it fails** — `node test/formdata-generate.test.js` → FAIL (`generatePerson is not a function`).
 
-Run: `node test/formdata-generate.test.js`
-Expected: FAIL — `F.generatePerson is not a function`.
-
-- [ ] **Step 3: Add pools + generator to `formdata.js`**
-
-Insert before the `root.SFFormData = …` line. (Pools are intentionally small but real; extend later.)
+- [ ] **Step 3: Add pools + generator to `formdata.js`** (insert before the `root.SFFormData = …` line):
 
 ```js
-  // --- locale pools (AU + US shipped; others fall back to GENERIC) ---
   const LOCALES = {
     AU: {
       firstNames: ['Jordan','Taylor','Casey','Morgan','Riley','Alex','Sam','Jamie','Dana','Harper'],
@@ -494,8 +385,7 @@ Insert before the `root.SFFormData = …` line. (Pools are intentionally small b
         { state: 'NSW', city: 'Sydney',    zips: ['2000','2010','2060'] },
         { state: 'WA',  city: 'Perth',     zips: ['6000','6008','6100'] }
       ],
-      phoneTemplate: '04## ### ###',
-      emailDomains: ['example.com.au','testmail.dev']
+      phoneTemplate: '04## ### ###', emailDomains: ['example.com.au','testmail.dev']
     },
     US: {
       firstNames: ['Casey','Jordan','Avery','Quinn','Skyler','Drew','Reese','Parker','Rowan','Emerson'],
@@ -507,8 +397,7 @@ Insert before the `root.SFFormData = …` line. (Pools are intentionally small b
         { state: 'TX', city: 'Austin',        zips: ['73301','78701','78704'] },
         { state: 'IL', city: 'Chicago',       zips: ['60601','60614','60618'] }
       ],
-      phoneTemplate: '(###) ###-####',
-      emailDomains: ['example.com','testmail.dev']
+      phoneTemplate: '(###) ###-####', emailDomains: ['example.com','testmail.dev']
     }
   };
   const GENERIC = {
@@ -516,8 +405,7 @@ Insert before the `root.SFFormData = …` line. (Pools are intentionally small b
     lastNames:  ['Taylor','Smith','Jones','Brown','Wilson','Clark'],
     streets:    ['Main Street','High Street','Park Road','Church Lane'],
     addresses:  [{ state: '', city: 'Springfield', zips: ['10000'] }],
-    phoneTemplate: '### ### ####',
-    emailDomains: ['example.com']
+    phoneTemplate: '### ### ####', emailDomains: ['example.com']
   };
 
   // Deterministic PRNG (mulberry32) so tests can seed; unseeded picks vary.
@@ -531,9 +419,7 @@ Insert before the `root.SFFormData = …` line. (Pools are intentionally small b
     };
   }
   function _pick(rng, arr) { return arr[Math.floor(rng() * arr.length)]; }
-  function _digits(rng, template) {
-    return template.replace(/#/g, () => String(Math.floor(rng() * 10)));
-  }
+  function _digits(rng, template) { return template.replace(/#/g, () => String(Math.floor(rng() * 10))); }
   function _slug(s) { return (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ''); }
 
   function generatePerson(profile, opts) {
@@ -542,7 +428,6 @@ Insert before the `root.SFFormData = …` line. (Pools are intentionally small b
     const rng = _rng(seed);
     const country = (profile && profile.country) || 'AU';
     const L = LOCALES[country] || GENERIC;
-
     const firstname = _pick(rng, L.firstNames);
     const lastname  = _pick(rng, L.lastNames);
     const row       = _pick(rng, L.addresses);
@@ -550,44 +435,27 @@ Insert before the `root.SFFormData = …` line. (Pools are intentionally small b
     const streetNo  = 1 + Math.floor(rng() * 998);
     const domain    = _pick(rng, L.emailDomains);
     const tag       = Math.floor(rng() * 9000) + 1000;
-
-    return {
-      firstname,
-      lastname,
-      fullname: `${firstname} ${lastname}`,
+    const person = {
+      firstname, lastname, fullname: `${firstname} ${lastname}`,
       username: `${_slug(firstname)}_${_slug(lastname)}${tag}`,
       email: `${_slug(firstname)}.${_slug(lastname)}.${tag}@${domain}`,
       phone: _digits(rng, L.phoneTemplate),
-      street1: `${streetNo} ${_pick(rng, L.streets)}`,
-      street2: '',
-      city: row.city,
-      state: row.state,
-      zip,
-      country,
+      street1: `${streetNo} ${_pick(rng, L.streets)}`, street2: '',
+      city: row.city, state: row.state, zip, country,
       password: `Dev${tag}!aZ`,
       dob: `19${70 + Math.floor(rng() * 30)}-0${1 + Math.floor(rng() * 9)}-1${Math.floor(rng() * 9)}`,
       business: `${lastname} ${_pick(rng, ['Holdings','Labs','Group','Trading'])} Pty Ltd`,
       genericText: 'Automated test input generated for development and QA validation.'
     };
+    return person; // pins applied in Task 5
   }
 ```
 
-Then extend the export object:
+Extend the export object: `…, toEngineValues, LOCALES, generatePerson };`
 
-```js
-  root.SFFormData = {
-    FIELD_GROUPS, CANONICAL_TO_ENGINE, ENGINE_TO_CANONICAL,
-    groupForField, toEngineValues,
-    LOCALES, generatePerson
-  };
-```
+- [ ] **Step 4: Run test to verify it passes** — `node --check formdata.js && node test/formdata-generate.test.js` → PASS.
 
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `node --check formdata.js && node test/formdata-generate.test.js`
-Expected: PASS — `✓ formdata-generate: … 0 failed`.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit:**
 
 ```bash
 git add formdata.js test/formdata-generate.test.js
@@ -598,96 +466,52 @@ git commit -m "feat: country-coherent person generator (seedable) in formdata"
 
 ## Task 5: `formdata.js` — pins (incl. `emailDomain`)
 
-**Files:**
-- Modify: `formdata.js`
-- Test: `test/formdata-pins.test.js`
+**Files:** Modify `formdata.js`; create `test/formdata-pins.test.js`
 
-**Interfaces:**
-- Produces, added to `window.SFFormData`:
-  - `applyPins(values, pins) → values'` (non-mutating). `pins.emailDomain` rewrites only the domain of `values.email`; any other key in `pins` whose name is a canonical field replaces that value outright. Unknown pin keys are ignored.
-  - `generatePerson` now calls `applyPins(person, profile.pins)` as its final step.
+**Interfaces:** Adds `applyPins(values, pins) → values'` (non-mutating). `pins.emailDomain` rewrites only the domain of `values.email`; any other key that is a canonical field replaces that value; unknown keys ignored. `generatePerson` now ends with `return applyPins(person, profile && profile.pins);`.
 
-- [ ] **Step 1: Write the failing test**
-
-Create `test/formdata-pins.test.js`:
+- [ ] **Step 1: Write the failing test** — create `test/formdata-pins.test.js`:
 
 ```js
 const { loadGlobals, eq, ok, done } = require('./harness');
-const win = loadGlobals(['vendor/address-schemas.js', 'formdata.js']);
-const F = win.SFFormData;
-
+const F = loadGlobals(['vendor/address-schemas.js', 'formdata.js']).SFFormData;
 const base = { email: 'jane.doe.1234@example.com.au', business: 'X Pty', zip: '4000', firstname: 'Jane' };
-
 const pinned = F.applyPins(base, { emailDomain: 'mycorp.test', business: 'Aether Dynamics Pty Ltd', zip: '4122' });
 eq(pinned.email, 'jane.doe.1234@mycorp.test', 'emailDomain rewrites domain only');
 eq(pinned.business, 'Aether Dynamics Pty Ltd', 'business pin overrides');
 eq(pinned.zip, '4122', 'zip pin overrides');
-eq(base.email, 'jane.doe.1234@example.com.au', 'applyPins does not mutate input');
-
-// unknown pin ignored
+eq(base.email, 'jane.doe.1234@example.com.au', 'does not mutate input');
 eq(F.applyPins(base, { bogus: 'x' }).firstname, 'Jane', 'unknown pin ignored');
-
-// generatePerson applies pins end-to-end
-const p = F.generatePerson({ country: 'AU', pins: { emailDomain: 'pinned.test' } }, { seed: 5 });
-ok(p.email.endsWith('@pinned.test'), 'generatePerson applies emailDomain pin');
-
+ok(F.generatePerson({ country: 'AU', pins: { emailDomain: 'pinned.test' } }, { seed: 5 }).email.endsWith('@pinned.test'),
+  'generatePerson applies emailDomain pin');
 done('formdata-pins');
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 2: Run it to verify it fails** — `node test/formdata-pins.test.js` → FAIL (`applyPins is not a function`).
 
-Run: `node test/formdata-pins.test.js`
-Expected: FAIL — `F.applyPins is not a function`.
-
-- [ ] **Step 3: Add `applyPins` and call it from `generatePerson`**
-
-Add this function (before `generatePerson`):
+- [ ] **Step 3: Add `applyPins` (before `generatePerson`) and call it:**
 
 ```js
   function applyPins(values, pins) {
     const out = Object.assign({}, values);
     if (!pins) return out;
     Object.keys(pins).forEach(key => {
-      const v = pins[key];
-      if (v == null || v === '') return;
+      const v = pins[key]; if (v == null || v === '') return;
       if (key === 'emailDomain') {
-        if (out.email && out.email.indexOf('@') !== -1) {
-          out.email = out.email.replace(/@.*$/, '@' + v);
-        }
+        if (out.email && out.email.indexOf('@') !== -1) out.email = out.email.replace(/@.*$/, '@' + v);
         return;
       }
-      if (Object.prototype.hasOwnProperty.call(CANONICAL_TO_ENGINE, key)) {
-        out[key] = v;
-      }
+      if (Object.prototype.hasOwnProperty.call(CANONICAL_TO_ENGINE, key)) out[key] = v;
     });
     return out;
   }
 ```
 
-Change the end of `generatePerson` so its `return { … }` is captured and pinned:
+Change `generatePerson`'s last line from `return person;` to `return applyPins(person, profile && profile.pins);`. Add `applyPins` to the export object.
 
-```js
-    const person = {
-      firstname,
-      // … all fields exactly as before …
-      genericText: 'Automated test input generated for development and QA validation.'
-    };
-    return applyPins(person, profile && profile.pins);
-  }
-```
+- [ ] **Step 4: Run tests to verify they pass** — `node --check formdata.js && node test/formdata-pins.test.js && node test/formdata-generate.test.js` → both PASS.
 
-Add `applyPins` to the export object:
-
-```js
-    LOCALES, generatePerson, applyPins
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `node --check formdata.js && node test/formdata-pins.test.js && node test/formdata-generate.test.js`
-Expected: both PASS (generate test still green).
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit:**
 
 ```bash
 git add formdata.js test/formdata-pins.test.js
@@ -696,72 +520,60 @@ git commit -m "feat: profile pins (emailDomain + field overrides) in formdata"
 
 ---
 
-## Task 6: `formdata.js` — policy gate + profile seed/defaults
+## Task 6: `formdata.js` — policy gate, `applyPolicy`/`resolveValues`, seeds
 
-**Files:**
-- Modify: `formdata.js`
-- Test: `test/formdata-policy.test.js`
+**Files:** Modify `formdata.js`; create `test/formdata-policy.test.js`
 
-**Interfaces:**
-- Produces, added to `window.SFFormData`:
-  - `PROFILES_VERSION` → `1` (integer).
-  - `DEFAULT_PROFILES` → `Profile[]` (the four seeds as generator configs).
-  - `shouldFill(canonicalKey, policy, only) → boolean`. `only` is `string[]` of group names or `null`. True iff the field's group is enabled in `policy.groups`, the key is not in `policy.exclude`, and (`only == null` or the field's group is in `only`).
-  - `MENU_ONLY` → `{ name:['name','contact'], address:['address'], nameAddress:['name','contact','address'], all:null }` (group sets for the form-icon menu actions).
+**Interfaces:** Adds to `window.SFFormData`:
+- `MENU_ONLY` → `{ name:['name','contact'], address:['address'], nameAddress:['name','contact','address'], all:null }`.
+- `shouldFill(canonicalKey, policy, only) → boolean` (group enabled ∧ key not excluded ∧ (`only==null` ∨ group ∈ `only`)).
+- `applyPolicy(engineValues, policy, only) → engineValues'` — keeps only engine categories whose canonical key passes `shouldFill`.
+- `resolveValues(profile, only, opts?) → engineValues` — `applyPolicy(toEngineValues(generatePerson(profile, opts)), profile.policy, only)`. The single value-resolution entry point the fill engine calls.
+- `PROFILES_VERSION` → `1`; `DEFAULT_PROFILES` → `Profile[]` (four seeds).
 
-- [ ] **Step 1: Write the failing test**
-
-Create `test/formdata-policy.test.js`:
+- [ ] **Step 1: Write the failing test** — create `test/formdata-policy.test.js`:
 
 ```js
 const { loadGlobals, eq, ok, done } = require('./harness');
-const win = loadGlobals(['vendor/address-schemas.js', 'formdata.js']);
-const F = win.SFFormData;
+const F = loadGlobals(['vendor/address-schemas.js', 'formdata.js']).SFFormData;
+const allOn = { groups:{ name:true, contact:true, address:true, account:true, misc:true }, exclude:[] };
 
-const policyAll = { groups: { name:true, contact:true, address:true, account:true, misc:true }, exclude: [] };
+const noAddr = { groups:{ name:true, contact:true, address:false, account:false, misc:false }, exclude:[] };
+ok(F.shouldFill('firstname', noAddr, null), 'name on');
+ok(!F.shouldFill('street1', noAddr, null), 'address off');
+const exEmail = { groups: allOn.groups, exclude: ['email'] };
+ok(!F.shouldFill('email', exEmail, null), 'email excluded');
+ok(F.shouldFill('phone', exEmail, null), 'phone still on');
+ok(F.shouldFill('firstname', allOn, F.MENU_ONLY.name), 'name-only fills name');
+ok(!F.shouldFill('street1', allOn, F.MENU_ONLY.name), 'name-only skips address');
+ok(F.shouldFill('street1', allOn, F.MENU_ONLY.address), 'address-only fills address');
+ok(F.shouldFill('password', allOn, F.MENU_ONLY.all), 'all fills account');
 
-// group disabled
-const noAddr = { groups: { name:true, contact:true, address:false, account:false, misc:false }, exclude: [] };
-ok(F.shouldFill('firstname', noAddr, null), 'name filled when name group on');
-ok(!F.shouldFill('street1', noAddr, null), 'street skipped when address group off');
+// applyPolicy + resolveValues operate on engine-category maps
+const eng = F.toEngineValues(F.generatePerson({ country:'AU' }, { seed: 2 }));
+const all = F.applyPolicy(eng, allOn, null);
+ok(all.firstName && all.address1 && all.email, 'applyPolicy all keeps categories');
+const nameOnly = F.applyPolicy(eng, allOn, F.MENU_ONLY.name);
+ok(nameOnly.firstName && !('address1' in nameOnly), 'applyPolicy name-only drops address');
+const ex = F.applyPolicy(eng, { groups: allOn.groups, exclude:['email'] }, null);
+ok(!('email' in ex) && ('phone' in ex), 'applyPolicy honours exclude');
+const prof = { country:'AU', policy: allOn, pins:{} };
+const resolved = F.resolveValues(prof, F.MENU_ONLY.address, { seed: 9 });
+ok(resolved.address1 && !('firstName' in resolved), 'resolveValues address-only');
 
-// per-field exclude
-const exclEmail = { groups: { name:true, contact:true, address:true, account:true, misc:true }, exclude: ['email'] };
-ok(!F.shouldFill('email', exclEmail, null), 'email excluded by per-field exclude');
-ok(F.shouldFill('phone', exclEmail, null), 'phone still filled');
-
-// transient menu override (only)
-ok(F.shouldFill('firstname', policyAll, F.MENU_ONLY.name), 'name-only fills name');
-ok(!F.shouldFill('street1', policyAll, F.MENU_ONLY.name), 'name-only skips address');
-ok(F.shouldFill('street1', policyAll, F.MENU_ONLY.address), 'address-only fills address');
-ok(F.shouldFill('email', policyAll, F.MENU_ONLY.nameAddress), 'name+address fills contact');
-ok(F.shouldFill('password', policyAll, F.MENU_ONLY.all), 'all fills account');
-
-// seed set
-eq(F.PROFILES_VERSION, 1, 'version is 1');
-eq(F.DEFAULT_PROFILES.length, 4, 'four seeded profiles');
-const ids = F.DEFAULT_PROFILES.map(p => p.id);
-ok(ids.indexOf('au-personal') !== -1 && ids.indexOf('us-test') !== -1, 'expected ids seeded');
-const biz = F.DEFAULT_PROFILES.find(p => p.id === 'au-business');
-ok(biz.pins && biz.pins.business, 'au-business pins company/business');
-
+eq(F.PROFILES_VERSION, 1, 'version 1');
+eq(F.DEFAULT_PROFILES.length, 4, 'four seeds');
+ok(F.DEFAULT_PROFILES.find(p => p.id === 'au-business').pins.business, 'au-business pins business');
 done('formdata-policy');
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 2: Run it to verify it fails** — `node test/formdata-policy.test.js` → FAIL (`shouldFill is not a function`).
 
-Run: `node test/formdata-policy.test.js`
-Expected: FAIL — `F.shouldFill is not a function`.
-
-- [ ] **Step 3: Add policy gate + seed to `formdata.js`**
+- [ ] **Step 3: Add policy gate, value resolution, and seeds to `formdata.js`:**
 
 ```js
-  const MENU_ONLY = {
-    name: ['name', 'contact'],
-    address: ['address'],
-    nameAddress: ['name', 'contact', 'address'],
-    all: null
-  };
+  const MENU_ONLY = { name:['name','contact'], address:['address'],
+    nameAddress:['name','contact','address'], all:null };
 
   function shouldFill(key, policy, only) {
     const g = groupForField(key);
@@ -771,6 +583,17 @@ Expected: FAIL — `F.shouldFill is not a function`.
     if (only && only.indexOf(g) === -1) return false;
     return true;
   }
+  function applyPolicy(engineValues, policy, only) {
+    const out = {};
+    Object.keys(engineValues || {}).forEach(cat => {
+      const canonical = ENGINE_TO_CANONICAL[cat];
+      if (canonical && shouldFill(canonical, policy, only)) out[cat] = engineValues[cat];
+    });
+    return out;
+  }
+  function resolveValues(profile, only, opts) {
+    return applyPolicy(toEngineValues(generatePerson(profile, opts)), profile && profile.policy, only || null);
+  }
 
   const PROFILES_VERSION = 1;
   const _allGroups = { name:true, contact:true, address:true, account:true, misc:true };
@@ -778,8 +601,7 @@ Expected: FAIL — `F.shouldFill is not a function`.
     { id:'au-personal', label:'AU Personal', country:'AU', randomize:true,
       policy:{ groups:Object.assign({}, _allGroups, { misc:false }), exclude:[] }, pins:{} },
     { id:'au-business', label:'AU Business / Company', country:'AU', randomize:true,
-      policy:{ groups:Object.assign({}, _allGroups), exclude:[] },
-      pins:{ business:'Aether Dynamics Pty Ltd' } },
+      policy:{ groups:Object.assign({}, _allGroups), exclude:[] }, pins:{ business:'Aether Dynamics Pty Ltd' } },
     { id:'us-test', label:'US Test User', country:'US', randomize:true,
       policy:{ groups:Object.assign({}, _allGroups, { misc:false }), exclude:[] }, pins:{} },
     { id:'minimal', label:'Minimal / Edge Case', country:'AU', randomize:true,
@@ -787,92 +609,62 @@ Expected: FAIL — `F.shouldFill is not a function`.
   ];
 ```
 
-Extend the export object:
+Extend the export: `…, applyPins, MENU_ONLY, shouldFill, applyPolicy, resolveValues, PROFILES_VERSION, DEFAULT_PROFILES };`
 
-```js
-    LOCALES, generatePerson, applyPins,
-    MENU_ONLY, shouldFill, PROFILES_VERSION, DEFAULT_PROFILES
-```
+- [ ] **Step 4: Run test to verify it passes** — `node --check formdata.js && node test/formdata-policy.test.js` → PASS.
 
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `node --check formdata.js && node test/formdata-policy.test.js`
-Expected: PASS — `✓ formdata-policy: … 0 failed`.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit:**
 
 ```bash
 git add formdata.js test/formdata-policy.test.js
-git commit -m "feat: policy gate, menu-override sets, and profile seeds in formdata"
+git commit -m "feat: policy gate, value resolution, and profile seeds in formdata"
 ```
 
 ---
 
 ## Task 7: `background.js` — seed & migrate `profiles`
 
-**Files:**
-- Modify: `background.js`
-- Test: `test/background-seed.test.js`
+**Files:** Create `seed-data.node.js`, `test/background-seed.test.js`, `test/seed-drift.test.js`; modify `background.js`
 
-**Interfaces:**
-- Consumes: `window.SFFormData.DEFAULT_PROFILES`, `PROFILES_VERSION`.
-- Produces: `seedProfiles(store) → Promise<void>` where `store` is a `{ get(keys)→Promise, set(obj)→Promise }` shim over `chrome.storage.local`. Seeds `profiles` + `profilesVersion` when `profiles` is absent **or** stored `profilesVersion` < `PROFILES_VERSION`; never overwrites when present and current. Sets `defaultProfile` to the first seed id only if unset. Must be exported for tests (e.g. `globalThis.seedProfiles = seedProfiles` when not in a module context) **and** invoked from the existing `chrome.runtime.onInstalled` handler.
+**Interfaces:** `seedProfiles(store)` where `store = { get(keys)→Promise, set(obj)→Promise }`. Seeds `profiles` + `profilesVersion` when `profiles` absent **or** stored version < `PROFILES_VERSION`; never overwrites when present+current; sets `defaultProfile` to the first seed id only if unset. Defined once in `seed-data.node.js` (CommonJS, for tests) and mirrored inline in `background.js` (the service worker is an ES module and cannot load the classic `window.SFFormData` global). `test/seed-drift.test.js` fails the build if ids/version drift between `seed-data.node.js`, `background.js`, and `formdata.js`.
 
-> **Why the seed data is duplicated:** the service worker is an ES module and cannot share `formdata.js`’s classic `window.*` global, so the seed array necessarily exists in three places: `formdata.js` (Task 6, for content/options), `background.js` (inline, for the install handler), and `seed-data.node.js` (CommonJS, so the Node tests can `require()` the *exact* seeding logic). This is accepted; **`test/seed-drift.test.js` (Step 4) fails the build if the ids or version drift** between the three copies. Do not try to collapse them into one file — there is no no-build way to do that across a module worker, a classic content script, and CommonJS tests.
+> **Why duplicated:** a module-worker can't share a classic `window.*` global. Accepted; the drift-guard test is the safety net. Do not attempt to collapse the three copies — there is no no-build way to do so across a module worker, a classic content script, and CommonJS tests.
 
-- [ ] **Step 1: Write the failing test**
-
-Create `test/background-seed.test.js`:
+- [ ] **Step 1: Write the failing test** — create `test/background-seed.test.js`:
 
 ```js
 const path = require('path');
-const { ok, eq, done } = require('./harness');
+const { eq, ok, done } = require('./harness');
 const { seedProfiles, DEFAULT_PROFILES, PROFILES_VERSION } = require(path.resolve(__dirname, '..', 'seed-data.node.js'));
-
 function fakeStore(initial) {
   const data = Object.assign({}, initial);
-  return {
-    data,
-    get(keys) { const out = {}; (Array.isArray(keys)?keys:[keys]).forEach(k => { if (k in data) out[k] = data[k]; }); return Promise.resolve(out); },
-    set(obj) { Object.assign(data, obj); return Promise.resolve(); }
-  };
+  return { data,
+    get(keys){ const o={}; (Array.isArray(keys)?keys:[keys]).forEach(k=>{ if(k in data) o[k]=data[k]; }); return Promise.resolve(o); },
+    set(obj){ Object.assign(data, obj); return Promise.resolve(); } };
 }
-
 (async () => {
-  // absent -> seeds
-  const s1 = fakeStore({});
-  await seedProfiles(s1);
-  eq(s1.data.profiles.length, 4, 'seeds 4 profiles when absent');
+  const s1 = fakeStore({}); await seedProfiles(s1);
+  eq(s1.data.profiles.length, 4, 'seeds when absent');
   eq(s1.data.profilesVersion, PROFILES_VERSION, 'sets version');
   eq(s1.data.defaultProfile, DEFAULT_PROFILES[0].id, 'sets default when unset');
-
-  // present + current -> untouched
-  const s2 = fakeStore({ profiles: [{ id:'mine' }], profilesVersion: PROFILES_VERSION, defaultProfile: 'mine' });
+  const s2 = fakeStore({ profiles:[{id:'mine'}], profilesVersion: PROFILES_VERSION, defaultProfile:'mine' });
   await seedProfiles(s2);
-  eq(s2.data.profiles.length, 1, 'does not clobber current profiles');
+  eq(s2.data.profiles.length, 1, 'no clobber when current');
   eq(s2.data.defaultProfile, 'mine', 'keeps existing default');
-
-  // older version -> reseed
-  const s3 = fakeStore({ profiles: [{ id:'old' }], profilesVersion: 0, defaultProfile: 'old' });
+  const s3 = fakeStore({ profiles:[{id:'old'}], profilesVersion: 0, defaultProfile:'old' });
   await seedProfiles(s3);
-  eq(s3.data.profiles.length, 4, 'reseeds when version older');
-
+  eq(s3.data.profiles.length, 4, 'reseeds when older');
   done('background-seed');
 })();
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 2: Run it to verify it fails** — `node test/background-seed.test.js` → FAIL (`Cannot find module '…/seed-data.node.js'`).
 
-Run: `node test/background-seed.test.js`
-Expected: FAIL — `Cannot find module '…/seed-data.node.js'`.
-
-- [ ] **Step 3: Create the drift-free seed source and wire it in**
-
-Create `seed-data.node.js` (CommonJS — the single source of truth for seed data + seeding logic, requireable by the test and by `background.js` via dynamic import is not needed; instead `background.js` will inline-import an ESM mirror generated below):
+- [ ] **Step 3: Create `seed-data.node.js`:**
 
 ```js
-// seed-data.node.js — single source of truth for profile seeds + seeding logic.
-// CommonJS so tests can require() it. background.js mirrors the data via seed-data.js (ESM).
+// seed-data.node.js — CommonJS source of truth for seed logic (requireable by tests).
+// background.js mirrors this inline (module worker can't load the classic global).
 const PROFILES_VERSION = 1;
 const _all = { name:true, contact:true, address:true, account:true, misc:true };
 const DEFAULT_PROFILES = [
@@ -885,28 +677,20 @@ const DEFAULT_PROFILES = [
   { id:'minimal', label:'Minimal / Edge Case', country:'AU', randomize:true,
     policy:{ groups:{ name:true, contact:false, address:false, account:false, misc:false }, exclude:[] }, pins:{} }
 ];
-
 async function seedProfiles(store) {
   const cur = await store.get(['profiles', 'profilesVersion', 'defaultProfile']);
   const needsSeed = !cur.profiles || (cur.profilesVersion || 0) < PROFILES_VERSION;
   const patch = {};
-  if (needsSeed) {
-    patch.profiles = JSON.parse(JSON.stringify(DEFAULT_PROFILES));
-    patch.profilesVersion = PROFILES_VERSION;
-  }
+  if (needsSeed) { patch.profiles = JSON.parse(JSON.stringify(DEFAULT_PROFILES)); patch.profilesVersion = PROFILES_VERSION; }
   if (!cur.defaultProfile) patch.defaultProfile = DEFAULT_PROFILES[0].id;
   if (Object.keys(patch).length) await store.set(patch);
 }
-
 module.exports = { PROFILES_VERSION, DEFAULT_PROFILES, seedProfiles };
 ```
 
-> **Drift control:** `formdata.js`’s `DEFAULT_PROFILES`/`PROFILES_VERSION` (Task 6) and this file are two copies. To keep them honest, add an assertion test (Step 4a) that compares them. They are small and stable; if you prefer a single copy, you may instead have `formdata.js` read from a global set by an inlined literal — but the two-copy + guard-test approach is the chosen, simplest no-build option.
-
-Add a `chrome.storage.local` adapter and call it from `background.js`. In `background.js`, **inside the existing `chrome.runtime.onInstalled` listener** (and creating one if none exists), add:
+- [ ] **Step 4: Mirror into `background.js`.** Inside the existing `chrome.runtime.onInstalled` listener (create one if absent), add the inline mirror + call:
 
 ```js
-// Inline seed (service worker is an ES module; mirror of seed-data.node.js).
 const PROFILES_VERSION = 1;
 const _allGroups = { name:true, contact:true, address:true, account:true, misc:true };
 const DEFAULT_PROFILES = [
@@ -923,50 +707,34 @@ async function seedProfiles(store) {
   const cur = await store.get(['profiles', 'profilesVersion', 'defaultProfile']);
   const needsSeed = !cur.profiles || (cur.profilesVersion || 0) < PROFILES_VERSION;
   const patch = {};
-  if (needsSeed) {
-    patch.profiles = JSON.parse(JSON.stringify(DEFAULT_PROFILES));
-    patch.profilesVersion = PROFILES_VERSION;
-  }
+  if (needsSeed) { patch.profiles = JSON.parse(JSON.stringify(DEFAULT_PROFILES)); patch.profilesVersion = PROFILES_VERSION; }
   if (!cur.defaultProfile) patch.defaultProfile = DEFAULT_PROFILES[0].id;
   if (Object.keys(patch).length) await store.set(patch);
 }
-const _store = {
-  get: (keys) => chrome.storage.local.get(keys),
-  set: (obj) => chrome.storage.local.set(obj)
-};
-chrome.runtime.onInstalled.addListener(() => { seedProfiles(_store); });
+chrome.runtime.onInstalled.addListener(() => {
+  seedProfiles({ get: (k) => chrome.storage.local.get(k), set: (o) => chrome.storage.local.set(o) });
+});
 ```
 
-- [ ] **Step 4: Add the drift-guard test**
-
-Append to `test/background-seed.test.js` is awkward (it `process.exit`s); instead create `test/seed-drift.test.js`:
+- [ ] **Step 5: Create `test/seed-drift.test.js`:**
 
 ```js
-const path = require('path');
-const fs = require('fs');
-const { ok, eq, done } = require('./harness');
+const path = require('path'), fs = require('fs');
+const { ok, done } = require('./harness');
 const { DEFAULT_PROFILES, PROFILES_VERSION } = require(path.resolve(__dirname, '..', 'seed-data.node.js'));
-
-// background.js must embed the same version + ids, so the SW seed can't drift.
-const bg = fs.readFileSync(path.resolve(__dirname, '..', 'background.js'), 'utf8');
-ok(bg.indexOf('PROFILES_VERSION = ' + PROFILES_VERSION) !== -1, 'background PROFILES_VERSION matches');
-DEFAULT_PROFILES.forEach(p => ok(bg.indexOf(`id:'${p.id}'`) !== -1 || bg.indexOf(`id: '${p.id}'`) !== -1,
-  `background seeds ${p.id}`));
-
-// formdata.js must embed the same ids too.
-const fd = fs.readFileSync(path.resolve(__dirname, '..', 'formdata.js'), 'utf8');
-DEFAULT_PROFILES.forEach(p => ok(fd.indexOf(`id:'${p.id}'`) !== -1 || fd.indexOf(`id: '${p.id}'`) !== -1,
-  `formdata seeds ${p.id}`));
-
+const root = path.resolve(__dirname, '..');
+const has = (s, id) => s.indexOf(`id:'${id}'`) !== -1 || s.indexOf(`id: '${id}'`) !== -1;
+const bg = fs.readFileSync(path.join(root, 'background.js'), 'utf8');
+ok(bg.indexOf('PROFILES_VERSION = ' + PROFILES_VERSION) !== -1, 'background version matches');
+DEFAULT_PROFILES.forEach(p => ok(has(bg, p.id), `background seeds ${p.id}`));
+const fd = fs.readFileSync(path.join(root, 'formdata.js'), 'utf8');
+DEFAULT_PROFILES.forEach(p => ok(has(fd, p.id), `formdata seeds ${p.id}`));
 done('seed-drift');
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [ ] **Step 6: Run tests to verify they pass** — `node --check background.js && node test/background-seed.test.js && node test/seed-drift.test.js` → all PASS.
 
-Run: `node --check background.js && node test/background-seed.test.js && node test/seed-drift.test.js`
-Expected: both PASS.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit:**
 
 ```bash
 git add seed-data.node.js background.js test/background-seed.test.js test/seed-drift.test.js
@@ -975,87 +743,258 @@ git commit -m "feat: seed/migrate storage-backed profiles on install"
 
 ---
 
-## Task 8: `content.js` — rewire `fillWithProfile` to storage + generator + policy gate
+## Task 8: `formdata.js` — profile data-ops (CRUD)
 
-**Files:**
-- Modify: `content.js` (`fillWithProfile`, and the message listener that calls it)
-- Test: `test/content-fill.test.js`
+**Files:** Modify `formdata.js`; create `test/formdata-crud.test.js`
 
-**Interfaces:**
-- Consumes: `window.SFFormData` (`generatePerson`, `toEngineValues`, `shouldFill`, `ENGINE_TO_CANONICAL`, `MENU_ONLY`), and `chrome.storage.local.get(['profiles','defaultProfile'])`.
-- Changes `fillWithProfile(profileKey, opts)` so it: (1) loads the profile object from storage `profiles` by `id` (falling back to first profile, then to a built-in default config if storage empty); (2) calls `generatePerson(profile)` → `toEngineValues(...)`; (3) when assigning a detected field of engine-category `cat`, fills only if `shouldFill(ENGINE_TO_CANONICAL[cat], profile.policy, opts.only)` is true; (4) no longer calls `uniquifyProfile`. `opts.only` is a group-name array or null.
-- Produces a small **testable pure helper** exported on `window` for the test: `window.__sfApplyPolicy(engineValues, policy, only) → engineValues'` (keeps only gated categories). The fill loop uses this helper.
+**Interfaces:** Adds pure data-ops to `window.SFFormData` (no DOM):
+- `profilesCreate(profiles, label) → { profiles, id }` (appends a blank: AU, all-groups-on, empty pins; id = unique slug of label).
+- `profilesClone(profiles, id) → { profiles, id }` (deep copy, "… (copy)" label, fresh id).
+- `profilesRename(profiles, id, label) → profiles`.
+- `profilesDelete(profiles, id) → profiles` (refuses to delete the last remaining profile → returns unchanged).
+- `profilePatch(profiles, id, patch) → profiles` (shallow-merge `country`/`policy`/`pins`/`label`).
 
-- [ ] **Step 1: Write the failing test**
-
-Create `test/content-fill.test.js` (tests the pure policy-application helper that the fill loop uses; full DOM fill is covered by the existing scratchpad scan/fill tests):
+- [ ] **Step 1: Write the failing test** — create `test/formdata-crud.test.js`:
 
 ```js
-const { loadGlobals, ok, eq, done } = require('./harness');
-// Load globals the helper depends on, then a thin extract of the helper.
-const win = loadGlobals(['vendor/address-schemas.js', 'formdata.js', 'test/fixtures/apply-policy.js']);
-const apply = win.__sfApplyPolicy;
-const F = win.SFFormData;
+const { loadGlobals, eq, ok, done } = require('./harness');
+const F = loadGlobals(['vendor/address-schemas.js', 'formdata.js']).SFFormData;
+let profiles = JSON.parse(JSON.stringify(F.DEFAULT_PROFILES));
 
-const values = F.toEngineValues(F.generatePerson({ country:'AU' }, { seed: 2 }));
-const policyAll = { groups:{ name:true, contact:true, address:true, account:true, misc:true }, exclude:[] };
-
-// all
-const all = apply(values, policyAll, null);
-ok(all.firstName && all.address1 && all.email, 'all categories kept');
-
-// name-only override
-const nameOnly = apply(values, policyAll, F.MENU_ONLY.name);
-ok(nameOnly.firstName && !('address1' in nameOnly), 'name-only drops address');
-
-// exclude email
-const exEmail = apply(values, { groups: policyAll.groups, exclude: ['email'] }, null);
-ok(!('email' in exEmail), 'excluded email dropped');
-ok('phone' in exEmail, 'phone kept');
-
-done('content-fill');
+let r = F.profilesCreate(profiles, 'My Profile'); profiles = r.profiles;
+eq(profiles.length, 5, 'create appends');
+eq(profiles.find(p => p.id === r.id).country, 'AU', 'new profile AU default');
+r = F.profilesClone(profiles, 'us-test'); profiles = r.profiles;
+eq(profiles.length, 6, 'clone appends');
+ok(profiles.find(p => p.id === r.id).label.indexOf('copy') !== -1, 'clone label tagged');
+ok(profiles.find(p => p.id === r.id).country === 'US', 'clone copies country');
+profiles = F.profilesRename(profiles, r.id, 'Renamed');
+eq(profiles.find(p => p.id === r.id).label, 'Renamed', 'renamed');
+profiles = F.profilePatch(profiles, 'au-personal', { country: 'US', pins: { emailDomain: 'x.test' } });
+const ap = profiles.find(p => p.id === 'au-personal');
+eq(ap.country, 'US', 'patched country'); eq(ap.pins.emailDomain, 'x.test', 'patched pins');
+profiles = F.profilesDelete(profiles, r.id);
+ok(!profiles.find(p => p.id === r.id), 'deleted');
+eq(F.profilesDelete([profiles[0]], profiles[0].id).length, 1, 'refuses to delete last');
+done('formdata-crud');
 ```
 
-- [ ] **Step 2: Create the fixture mirroring the helper, run, verify it fails**
+- [ ] **Step 2: Run it to verify it fails** — `node test/formdata-crud.test.js` → FAIL (`profilesCreate is not a function`).
 
-Create `test/fixtures/apply-policy.js` (this is the canonical helper body; Step 3 inlines the identical function into `content.js`):
+- [ ] **Step 3: Add the data-ops to `formdata.js`:**
 
 ```js
-;(function (root) {
-  function __sfApplyPolicy(engineValues, policy, only) {
-    const F = root.SFFormData;
-    const out = {};
-    Object.keys(engineValues).forEach(cat => {
-      const canonical = F.ENGINE_TO_CANONICAL[cat];
-      if (canonical && F.shouldFill(canonical, policy, only)) out[cat] = engineValues[cat];
-    });
-    return out;
+  function _slug(s){ return (s||'profile').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,''); }
+  function _uniqueId(profiles, base){
+    base = base || 'profile'; let id = base, n = 1;
+    const taken = {}; profiles.forEach(p => { taken[p.id] = true; });
+    while (taken[id]) { id = `${base}-${n++}`; }
+    return id;
   }
-  root.__sfApplyPolicy = __sfApplyPolicy;
+  function _blankPolicy(){ return { groups:{ name:true, contact:true, address:true, account:true, misc:true }, exclude:[] }; }
+  function profilesCreate(profiles, label){
+    const next = profiles.slice(); const id = _uniqueId(next, _slug(label));
+    next.push({ id, label: label || 'New Profile', country:'AU', randomize:true, policy:_blankPolicy(), pins:{} });
+    return { profiles: next, id };
+  }
+  function profilesClone(profiles, id){
+    const src = profiles.find(p => p.id === id); if (!src) return { profiles, id:null };
+    const next = profiles.slice(); const newId = _uniqueId(next, _slug(src.label) + '-copy');
+    next.push(Object.assign(JSON.parse(JSON.stringify(src)), { id:newId, label: src.label + ' (copy)' }));
+    return { profiles: next, id: newId };
+  }
+  function profilesRename(profiles, id, label){ return profiles.map(p => p.id === id ? Object.assign({}, p, { label }) : p); }
+  function profilesDelete(profiles, id){ return profiles.length <= 1 ? profiles : profiles.filter(p => p.id !== id); }
+  function profilePatch(profiles, id, patch){ return profiles.map(p => p.id === id ? Object.assign({}, p, patch) : p); }
+```
+
+Extend the export: `…, DEFAULT_PROFILES, profilesCreate, profilesClone, profilesRename, profilesDelete, profilePatch };`
+
+- [ ] **Step 4: Run test to verify it passes** — `node --check formdata.js && node test/formdata-crud.test.js` → PASS.
+
+- [ ] **Step 5: Commit:**
+
+```bash
+git add formdata.js test/formdata-crud.test.js
+git commit -m "feat: profile CRUD data-ops in formdata"
+```
+
+---
+
+## Task 9: `profile-ui.js` — shared DOM builders
+
+**Files:** Create `profile-ui.js`, `test/profile-ui.test.js`
+
+**Interfaces:** Consumes `window.SFAddress`. Produces `window.SFProfileUI`:
+- `buildMenu(doc, profiles, defaultId) → HTMLElement` — a menu with four `[data-only]` action buttons (`name`, `address`, `nameAddress`, `all`) labelled "Fill name / Fill address / Fill name + address / Fill all", a profile `<select>` (preselect `defaultId`), and a `[data-action="clear"]` "Clear fields" button.
+- `populateProfileSelect(doc, selectEl, profiles, defaultId) → selectEl` — replaces options from `profiles`, preselects `defaultId`.
+- `renderAddressFields(doc, container, country) → void` — renders one labelled input (`[data-field]`) per shown address field in `SFAddress.getFieldConfig(country).order` order, with country label, `*` for required, and zip hint placeholder; replaces prior fields on re-invocation.
+
+> All three take `doc` explicitly so they are pure of any ambient `document` and trivially testable.
+
+- [ ] **Step 1: Write the failing test** — create `test/profile-ui.test.js`:
+
+```js
+const { loadGlobals, eq, ok, done } = require('./harness');
+const win = loadGlobals(['vendor/address-schemas.js', 'profile-ui.js'],
+  '<!DOCTYPE html><body><select id="s"></select><div id="c"></div></body>');
+const UI = win.SFProfileUI, doc = win.document;
+
+// buildMenu
+const menu = UI.buildMenu(doc, [{ id:'au-personal', label:'AU Personal' }, { id:'us-test', label:'US Test User' }], 'us-test');
+['Fill name','Fill address','Fill name + address','Fill all','Clear'].forEach(t => ok(menu.textContent.indexOf(t) !== -1, `menu has "${t}"`));
+const onlys = Array.from(menu.querySelectorAll('[data-only]')).map(b => b.getAttribute('data-only'));
+['name','address','nameAddress','all'].forEach(k => ok(onlys.indexOf(k) !== -1, `action ${k} present`));
+const msel = menu.querySelector('select');
+eq(msel.options.length, 2, 'menu profile select has 2'); eq(msel.value, 'us-test', 'menu default preselected');
+
+// populateProfileSelect
+const sel = doc.getElementById('s');
+UI.populateProfileSelect(doc, sel, [{ id:'au-personal', label:'AU Personal' }, { id:'us-test', label:'US Test User' }], 'us-test');
+eq(sel.options.length, 2, 'select 2 options'); eq(sel.value, 'us-test', 'select default'); eq(sel.options[0].textContent, 'AU Personal', 'label rendered');
+
+// renderAddressFields (AU then US re-render)
+const c = doc.getElementById('c');
+UI.renderAddressFields(doc, c, 'AU');
+let labels = Array.from(c.querySelectorAll('label')).map(l => l.textContent);
+ok(labels.some(t => t.indexOf('Suburb') !== -1), 'AU Suburb');
+ok(labels.some(t => t.indexOf('State/Territory') !== -1), 'AU State/Territory');
+ok(labels.some(t => t.indexOf('Postcode') !== -1), 'AU Postcode');
+UI.renderAddressFields(doc, c, 'US');
+labels = Array.from(c.querySelectorAll('label')).map(l => l.textContent);
+ok(labels.some(t => t.indexOf('City') !== -1), 'US City after re-render');
+ok(labels.some(t => t.indexOf('ZIP') !== -1), 'US ZIP');
+ok(!labels.some(t => t.indexOf('Suburb') !== -1), 'AU fields cleared on re-render');
+done('profile-ui');
+```
+
+- [ ] **Step 2: Run it to verify it fails** — `node test/profile-ui.test.js` → FAIL (`SFProfileUI` undefined).
+
+- [ ] **Step 3: Create `profile-ui.js`:**
+
+```js
+// profile-ui.js — window.SFProfileUI: shared DOM builders for menu + profile editor.
+// Classic global script. Loads after vendor/address-schemas.js.
+;(function (root) {
+  'use strict';
+  const MENU_ACTIONS = [
+    ['name', 'Fill name'], ['address', 'Fill address'],
+    ['nameAddress', 'Fill name + address'], ['all', 'Fill all']
+  ];
+  const ADDR_KEYS_BY_GROUP = { street: ['street1', 'street2'], city: ['city'], state: ['state'], zip: ['zip'] };
+
+  function _option(doc, value, text, selected) {
+    const o = doc.createElement('option'); o.value = value; o.textContent = text; if (selected) o.selected = true; return o;
+  }
+  function populateProfileSelect(doc, sel, profiles, defaultId) {
+    sel.innerHTML = '';
+    (profiles || []).forEach(p => sel.appendChild(_option(doc, p.id, p.label || p.id, p.id === defaultId)));
+    return sel;
+  }
+  function buildMenu(doc, profiles, defaultId) {
+    const wrap = doc.createElement('div');
+    MENU_ACTIONS.forEach(([key, label]) => {
+      const b = doc.createElement('button'); b.type = 'button'; b.textContent = label; b.setAttribute('data-only', key); wrap.appendChild(b);
+    });
+    const sel = doc.createElement('select'); sel.setAttribute('data-role', 'profile');
+    populateProfileSelect(doc, sel, profiles, defaultId); wrap.appendChild(sel);
+    const clear = doc.createElement('button'); clear.type = 'button'; clear.textContent = 'Clear fields'; clear.setAttribute('data-action', 'clear');
+    wrap.appendChild(clear);
+    return wrap;
+  }
+  function renderAddressFields(doc, container, country) {
+    const A = root.SFAddress, cfg = A.getFieldConfig(country);
+    container.innerHTML = '';
+    cfg.order.forEach(group => (ADDR_KEYS_BY_GROUP[group] || []).forEach(key => {
+      const f = cfg.fields[key]; if (!f || !f.show) return;
+      const wrap = doc.createElement('div');
+      const label = doc.createElement('label'); label.textContent = f.label + (f.required ? ' *' : '');
+      const input = doc.createElement('input'); input.setAttribute('data-field', key);
+      if (key === 'zip') { const h = A.getZipHint(country); if (h) input.setAttribute('placeholder', h); }
+      wrap.appendChild(label); wrap.appendChild(input); container.appendChild(wrap);
+    }));
+  }
+  root.SFProfileUI = { buildMenu, populateProfileSelect, renderAddressFields };
 })(typeof window !== 'undefined' ? window : globalThis);
 ```
 
-Run: `node test/content-fill.test.js`
-Expected: PASS only after the fixture exists; run once *before* creating the fixture to confirm the FAIL (`__sfApplyPolicy is not a function`), then create it and it should pass. (Document both runs.)
+- [ ] **Step 4: Run test to verify it passes** — `node --check profile-ui.js && node test/profile-ui.test.js` → PASS.
 
-- [ ] **Step 3: Inline the helper and rewire `fillWithProfile` in `content.js`**
+- [ ] **Step 5: Commit:**
 
-Near the top of the IIFE (after the existing helpers), add the identical helper:
-
-```js
-  function __sfApplyPolicy(engineValues, policy, only) {
-    const F = window.SFFormData;
-    const out = {};
-    Object.keys(engineValues).forEach(cat => {
-      const canonical = F.ENGINE_TO_CANONICAL[cat];
-      if (canonical && F.shouldFill(canonical, policy, only)) out[cat] = engineValues[cat];
-    });
-    return out;
-  }
-  window.__sfApplyPolicy = __sfApplyPolicy; // exported for tests
+```bash
+git add profile-ui.js test/profile-ui.test.js
+git commit -m "feat: shared profile DOM builders (window.SFProfileUI)"
 ```
 
-Add a profile loader:
+---
+
+## Task 10: `content.js` — rewire `fillWithProfile` to storage + `resolveValues`
+
+**Files:** Modify `content.js`; create `test/helpers/chrome-mock.js`, `test/content-loadprofile.test.js`
+
+**Interfaces:** Consumes `window.SFFormData.resolveValues`, `chrome.storage.local`. Changes:
+- New `async function loadProfile(profileKey)` — reads `{profiles, defaultProfile}` from storage; falls back to `SFFormData.DEFAULT_PROFILES` when storage empty; returns the profile whose `id === (profileKey || defaultProfile || profiles[0].id)`, else `profiles[0]`. Exposed as `window.__sfLoadProfile` for testing.
+- `fillWithProfile(profileKey, opts)`: `profile = await loadProfile(profileKey)`; `values = SFFormData.resolveValues(profile, (opts && opts.only) || null)`; the fill loop writes `values[category]` and **skips any field whose `category` is absent from `values`**. Remove `BUILTIN_PROFILES` and `uniquifyProfile` from this path. `opts.only` is a group-name array (from `MENU_ONLY`) or null.
+- The combobox/vue-select/Places/cascade branches are unchanged; they still receive `value` from `values[category]`.
+
+> The DOM write loop itself is verified manually (Task 16); jsdom can't faithfully render the live modal. This task unit-tests `loadProfile` (the only new content-specific branching) with a mocked `chrome`.
+
+- [ ] **Step 1: Create the chrome mock** — `test/helpers/chrome-mock.js`:
+
+```js
+// Reusable fake chrome.storage.local for tests. Test infra (no production logic).
+function makeChrome(initial) {
+  const data = Object.assign({}, initial);
+  return {
+    storage: { local: {
+      get: (keys) => Promise.resolve(
+        (Array.isArray(keys) ? keys : [keys]).reduce((o, k) => { if (k in data) o[k] = data[k]; return o; }, {})),
+      set: (obj) => { Object.assign(data, obj); return Promise.resolve(); }
+    } },
+    runtime: { onMessage: { addListener() {} }, lastError: null }
+  };
+}
+module.exports = { makeChrome };
+```
+
+- [ ] **Step 2: Write the failing test** — `test/content-loadprofile.test.js`:
+
+```js
+const { loadGlobals, eq, ok, done } = require('./harness');
+const { makeChrome } = require('./helpers/chrome-mock');
+const path = require('path'), fs = require('fs'), vm = require('vm');
+
+function bootstrap(initial) {
+  const win = loadGlobals(['vendor/address-schemas.js', 'formdata.js']);
+  win.chrome = makeChrome(initial);
+  win.__smartFormFillerLoaded = false;
+  vm.runInContext(fs.readFileSync(path.resolve(__dirname, '..', 'content.js'), 'utf8'),
+    win.document.defaultView.eval ? win : win); // content.js IIFE assigns window.__sfLoadProfile
+  return win;
+}
+
+(async () => {
+  const win = bootstrap({
+    profiles: [{ id:'au-personal', label:'AU' }, { id:'us-test', label:'US' }],
+    defaultProfile: 'us-test'
+  });
+  ok(typeof win.__sfLoadProfile === 'function', '__sfLoadProfile exposed');
+  eq((await win.__sfLoadProfile(null)).id, 'us-test', 'falls back to defaultProfile');
+  eq((await win.__sfLoadProfile('au-personal')).id, 'au-personal', 'honours explicit key');
+  eq((await win.__sfLoadProfile('missing')).id, 'au-personal', 'unknown id -> first profile');
+
+  const empty = bootstrap({});
+  ok((await empty.__sfLoadProfile(null)).id, 'empty storage -> built-in default profile');
+  done('content-loadprofile');
+})();
+```
+
+> If `content.js`'s top-of-IIFE guard (`if (window.__smartFormFillerLoaded) return;`) prevents re-eval, the test sets it false before eval. If loading the full `content.js` under jsdom throws on an unrelated browser API, wrap the missing API on `win` (e.g. `win.MutationObserver`, `win.getComputedStyle`) in the test bootstrap — jsdom provides most. Add only what the load actually requires; do not stub fill-path internals.
+
+- [ ] **Step 3: Run it to verify it fails** — `node test/content-loadprofile.test.js` → FAIL (`__sfLoadProfile` undefined).
+
+- [ ] **Step 4: Implement in `content.js`.** Near the existing helpers inside the IIFE add:
 
 ```js
   async function loadProfile(profileKey) {
@@ -1063,515 +1002,262 @@ Add a profile loader:
     let profiles = [], defaultProfile = null;
     try {
       const s = await chrome.storage.local.get(['profiles', 'defaultProfile']);
-      profiles = s.profiles || [];
-      defaultProfile = s.defaultProfile || null;
+      profiles = s.profiles || []; defaultProfile = s.defaultProfile || null;
     } catch (e) { /* storage unavailable */ }
     if (!profiles.length) profiles = F.DEFAULT_PROFILES;
     const wantId = profileKey || defaultProfile || profiles[0].id;
     return profiles.find(p => p.id === wantId) || profiles[0];
   }
+  window.__sfLoadProfile = loadProfile; // exported for tests
 ```
 
-Rewrite the value-resolution part of `fillWithProfile(profileKey, opts)`:
-- Replace the `BUILTIN_PROFILES[...]` lookup and the `if (opts.unique) profile = uniquifyProfile(profile)` block with:
+In `fillWithProfile(profileKey, opts)` replace the `BUILTIN_PROFILES[...]` + `uniquifyProfile` block with:
 
 ```js
     const F = window.SFFormData;
     const profile = await loadProfile(profileKey);
-    const generated = F.generatePerson(profile);                 // canonical values
-    const engineAll = F.toEngineValues(generated);               // engine-category values
-    const values = __sfApplyPolicy(engineAll, profile.policy, (opts && opts.only) || null);
+    const values = F.resolveValues(profile, (opts && opts.only) || null);
 ```
 
-- In the fill loop, where it previously called `valueForField(field, category, profile, allow)`, instead read `values[category]` and **skip the field entirely when `category` is absent from `values`** (gated out):
+In the fill loop, where it previously resolved a value via `valueForField(...)`, use:
 
 ```js
-      if (!(category in values)) continue;        // policy/override excluded this field
+      if (!(category in values)) continue;   // gated out by policy/override
       const value = values[category];
 ```
 
-- Remove `uniquifyProfile` calls from this path. (Leave the `uniquifyProfile` function defined but unused, or delete it; deleting is cleaner — confirm no other caller via `grep -n uniquifyProfile content.js`.)
-- Keep all combobox/vue-select/Places/cascade branches exactly as they are; they consume `value` unchanged.
+Delete the now-unused `uniquifyProfile`; confirm via `grep -n "uniquifyProfile\|BUILTIN_PROFILES" content.js` that no live reference remains in the fill path (a still-referenced `BUILTIN_PROFILES` elsewhere — e.g. an unrelated default — may stay, but the fill path must not use it).
 
-Update the message listener: the `'fillProfile'` / menu handlers must pass `opts.only` (group array) rather than `opts.unique`. The `'fillWithMap'` path is unchanged.
+- [ ] **Step 5: Run tests to verify they pass** — `node --check content.js && node test/content-loadprofile.test.js` → PASS.
 
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `node --check content.js && node test/content-fill.test.js`
-Expected: PASS. Also run `grep -n "uniquifyProfile\|BUILTIN_PROFILES" content.js` and confirm no live references remain in the fill path (only a possibly-deleted definition).
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit:**
 
 ```bash
-git add content.js test/content-fill.test.js test/fixtures/apply-policy.js
-git commit -m "feat: fill from storage profiles via generator + policy gate"
+git add content.js test/helpers/chrome-mock.js test/content-loadprofile.test.js
+git commit -m "feat: fill from storage profiles via SFFormData.resolveValues"
 ```
 
 ---
 
-## Task 9: `content.js` — rebuild the form-icon menu
+## Task 11: `content.js` — rebuild the form-icon menu via `SFProfileUI`
 
-**Files:**
-- Modify: `content.js` (`showFillMenu` / `runMenuAction` and the menu markup)
-- Test: `test/content-menu.test.js`
+**Files:** Modify `content.js` (`showFillMenu`/`runMenuAction`); create `test/content-menu-wiring.test.js`
 
-**Interfaces:**
-- Consumes: `window.SFFormData.MENU_ONLY`, `chrome.storage.local.get(['profiles','defaultProfile'])`.
-- The menu renders: **Fill name**, **Fill address**, **Fill name + address**, **Fill all**, a **profile `<select>`** (options from stored `profiles`, default = `defaultProfile`), and **Clear fields**. Each fill action calls `fillWithProfile(selectedProfileId, { only: MENU_ONLY[key] })`. Produces a pure builder `window.__sfBuildMenu(profiles, defaultId) → HTMLElement` so the test can assert structure without a live fill.
+**Interfaces:** Consumes `window.SFProfileUI.buildMenu`, `window.SFFormData.MENU_ONLY`, `chrome.storage.local`. `showFillMenu` loads `{profiles, defaultProfile}`, builds the menu via `SFProfileUI.buildMenu(document, profiles, defaultProfile)`, and wires events: clicking a `[data-only=key]` button → `runMenuAction(MENU_ONLY[key], profileSelect.value)`; the `[data-action=clear]` button → existing `clearDetected()`. `runMenuAction(only, profileId)` calls `fillWithProfile(profileId, { only })`. Icon placement / `formSections()` / `SF_UI_ATTR` unchanged.
 
-- [ ] **Step 1: Write the failing test**
+> `buildMenu` itself is fully tested in Task 9. This task verifies the wiring contract: that the menu maps each action key to the right `MENU_ONLY` value. Expose `window.__sfMenuOnlyFor(key)` → `SFFormData.MENU_ONLY[key]` (a one-line accessor the click handler uses) so the mapping is unit-checkable without a live click.
 
-Create `test/content-menu.test.js`:
+- [ ] **Step 1: Write the failing test** — `test/content-menu-wiring.test.js`:
 
 ```js
-const { loadGlobals, ok, eq, done } = require('./harness');
-const win = loadGlobals(['vendor/address-schemas.js', 'formdata.js', 'test/fixtures/build-menu.js']);
-const el = win.__sfBuildMenu(
-  [{ id:'au-personal', label:'AU Personal' }, { id:'us-test', label:'US Test User' }],
-  'us-test'
-);
-const text = el.textContent;
-['Fill name', 'Fill address', 'Fill name + address', 'Fill all', 'Clear'].forEach(t =>
-  ok(text.indexOf(t) !== -1, `menu has "${t}"`));
-const sel = el.querySelector('select');
-ok(sel, 'menu has a profile select');
-eq(sel.options.length, 2, 'two profiles listed');
-eq(sel.value, 'us-test', 'default profile preselected');
-// action buttons carry the right override key
-const names = Array.from(el.querySelectorAll('[data-only]')).map(b => b.getAttribute('data-only'));
-ok(names.indexOf('name') !== -1 && names.indexOf('address') !== -1 && names.indexOf('nameAddress') !== -1 && names.indexOf('all') !== -1,
-  'action buttons map to MENU_ONLY keys');
-done('content-menu');
+const { loadGlobals, eq, ok, done } = require('./harness');
+const { makeChrome } = require('./helpers/chrome-mock');
+const path = require('path'), fs = require('fs'), vm = require('vm');
+const win = loadGlobals(['vendor/address-schemas.js', 'formdata.js', 'profile-ui.js']);
+win.chrome = makeChrome({ profiles: [{ id:'au-personal', label:'AU' }], defaultProfile: 'au-personal' });
+win.__smartFormFillerLoaded = false;
+vm.runInContext(fs.readFileSync(path.resolve(__dirname, '..', 'content.js'), 'utf8'), win);
+ok(typeof win.__sfMenuOnlyFor === 'function', '__sfMenuOnlyFor exposed');
+eq(win.__sfMenuOnlyFor('name'), ['name','contact'], 'name -> name+contact');
+eq(win.__sfMenuOnlyFor('address'), ['address'], 'address -> address');
+eq(win.__sfMenuOnlyFor('nameAddress'), ['name','contact','address'], 'nameAddress -> all three');
+eq(win.__sfMenuOnlyFor('all'), null, 'all -> null (use profile policy)');
+done('content-menu-wiring');
 ```
 
-- [ ] **Step 2: Create the fixture builder, confirm fail-then-pass**
+- [ ] **Step 2: Run it to verify it fails** — `node test/content-menu-wiring.test.js` → FAIL (`__sfMenuOnlyFor` undefined).
 
-Create `test/fixtures/build-menu.js` (canonical builder; Step 3 inlines the identical DOM-building logic into `content.js`’s menu code):
+- [ ] **Step 3: Implement in `content.js`.** Replace the inline menu markup in `showFillMenu` with:
 
 ```js
-;(function (root) {
-  function __sfBuildMenu(profiles, defaultId) {
-    const doc = root.document;
-    const wrap = doc.createElement('div');
-    const actions = [
-      ['name', 'Fill name'],
-      ['address', 'Fill address'],
-      ['nameAddress', 'Fill name + address'],
-      ['all', 'Fill all']
-    ];
-    actions.forEach(([key, label]) => {
-      const b = doc.createElement('button');
-      b.textContent = label;
-      b.setAttribute('data-only', key);
-      wrap.appendChild(b);
-    });
-    const sel = doc.createElement('select');
-    (profiles || []).forEach(p => {
-      const o = doc.createElement('option');
-      o.value = p.id; o.textContent = p.label || p.id;
-      if (p.id === defaultId) o.selected = true;
-      sel.appendChild(o);
-    });
-    wrap.appendChild(sel);
-    const clear = doc.createElement('button');
-    clear.textContent = 'Clear fields'; clear.setAttribute('data-action', 'clear');
-    wrap.appendChild(clear);
-    return wrap;
-  }
-  root.__sfBuildMenu = __sfBuildMenu;
-})(typeof window !== 'undefined' ? window : globalThis);
+    const { profiles = [], defaultProfile = null } =
+      await chrome.storage.local.get(['profiles', 'defaultProfile']);
+    const list = profiles.length ? profiles : window.SFFormData.DEFAULT_PROFILES;
+    const menu = window.SFProfileUI.buildMenu(document, list, defaultProfile);
+    const profileSel = menu.querySelector('select[data-role="profile"]');
+    menu.querySelectorAll('[data-only]').forEach(btn => btn.addEventListener('click', () => {
+      runMenuAction(__sfMenuOnlyFor(btn.getAttribute('data-only')), profileSel.value);
+    }));
+    menu.querySelector('[data-action="clear"]').addEventListener('click', () => clearDetected());
+    // …append `menu` to the existing menu container / position as before…
 ```
 
-Run (before creating fixture): `node test/content-menu.test.js` → FAIL (`__sfBuildMenu is not a function`). Create fixture, rerun → PASS.
+Add the accessor + action runner:
 
-- [ ] **Step 3: Replace the menu in `content.js`**
+```js
+  function __sfMenuOnlyFor(key) { return window.SFFormData.MENU_ONLY[key]; }
+  window.__sfMenuOnlyFor = __sfMenuOnlyFor;
+  function runMenuAction(only, profileId) { return fillWithProfile(profileId, { only }); }
+```
 
-- Replace the inline menu markup in `showFillMenu` with the `__sfBuildMenu(profiles, defaultId)` builder (inline the identical function into `content.js` and export `window.__sfBuildMenu = __sfBuildMenu`). Load `profiles`/`defaultProfile` from storage before building.
-- Wire events: clicking a `[data-only]` button → `runMenuAction(MENU_ONLY[key], select.value)`; the clear button → existing `clearDetected()` path.
-- `runMenuAction(only, profileId)` calls `fillWithProfile(profileId, { only })`.
-- Keep the icon placement / `formSections()` / `SF_UI_ATTR` logic unchanged.
+(Keep the existing menu container styling/teardown; only its contents + handlers change.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 4: Run tests to verify they pass** — `node --check content.js && node test/content-menu-wiring.test.js && node test/content-loadprofile.test.js` → all PASS.
 
-Run: `node --check content.js && node test/content-menu.test.js && node test/content-fill.test.js`
-Expected: all PASS.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit:**
 
 ```bash
-git add content.js test/content-menu.test.js test/fixtures/build-menu.js
-git commit -m "feat: form-icon menu with field-set actions + profile picker"
+git add content.js test/content-menu-wiring.test.js
+git commit -m "feat: form-icon menu via SFProfileUI with field-set actions + profile picker"
 ```
 
 ---
 
-## Task 10: `popup.js`/`popup.html` — profile dropdown from storage
+## Task 12: `popup` — profile dropdown via `SFProfileUI`
 
-**Files:**
-- Modify: `popup.html` (the `#profileSelect` element stays; options now dynamic)
-- Modify: `popup.js` (populate `#profileSelect` from storage; pass selected id on fill)
-- Test: `test/popup-profiles.test.js`
+**Files:** Modify `popup.html`, `popup.js`; create `test/popup-wiring.test.js`
 
-**Interfaces:**
-- Consumes: `chrome.storage.local.get(['profiles','defaultProfile'])`.
-- Produces a pure helper `window.__sfPopulateProfileSelect(selectEl, profiles, defaultId)` that fills a `<select>` and preselects the default. `popup.js` calls it on load; the fill buttons send `{ profileKey: select.value }` to the content script.
+**Interfaces:** Consumes `window.SFProfileUI.populateProfileSelect`, `chrome.storage.local`. On load, `popup.js` reads `{profiles, defaultProfile}` (falls back to `SFFormData.DEFAULT_PROFILES`) and calls `SFProfileUI.populateProfileSelect(document, profileSelect, profiles, defaultProfile)`. Fill buttons send `{ profileKey: profileSelect.value }` to the content script. `popup.html` loads `vendor/address-schemas.js`, `formdata.js`, `profile-ui.js` before `popup.js`.
 
-- [ ] **Step 1: Write the failing test**
-
-Create `test/popup-profiles.test.js`:
+- [ ] **Step 1: Write the failing test** — `test/popup-wiring.test.js`:
 
 ```js
-const { loadGlobals, ok, eq, done } = require('./harness');
-const win = loadGlobals(['test/fixtures/populate-select.js'],
-  '<!DOCTYPE html><body><select id="p"></select></body>');
-const sel = win.document.getElementById('p');
-win.__sfPopulateProfileSelect(sel,
-  [{ id:'au-personal', label:'AU Personal' }, { id:'us-test', label:'US Test User' }], 'us-test');
-eq(sel.options.length, 2, 'two options');
-eq(sel.value, 'us-test', 'default preselected');
-eq(sel.options[0].textContent, 'AU Personal', 'label rendered');
-done('popup-profiles');
+const { loadGlobals, ok, done } = require('./harness');
+const fs = require('fs'), path = require('path');
+// popup.html must load the shared modules before popup.js
+const html = fs.readFileSync(path.resolve(__dirname, '..', 'popup.html'), 'utf8');
+['vendor/address-schemas.js', 'formdata.js', 'profile-ui.js'].forEach(s =>
+  ok(html.indexOf(s) !== -1, `popup.html loads ${s}`));
+ok(html.indexOf('profile-ui.js') < html.indexOf('popup.js'), 'profile-ui.js before popup.js');
+// the four hardcoded <option>s are gone (now injected)
+ok(html.indexOf('au-personal') === -1 || html.indexOf('<option value="au-personal"') === -1,
+  'no hardcoded profile options remain');
+// popup.js calls the shared populator
+const js = fs.readFileSync(path.resolve(__dirname, '..', 'popup.js'), 'utf8');
+ok(js.indexOf('populateProfileSelect') !== -1, 'popup.js uses SFProfileUI.populateProfileSelect');
+ok(js.indexOf('profileKey') !== -1, 'popup.js sends profileKey');
+done('popup-wiring');
 ```
 
-- [ ] **Step 2: Create the fixture, confirm fail-then-pass**
+- [ ] **Step 2: Run it to verify it fails** — `node test/popup-wiring.test.js` → FAIL (scripts not yet referenced).
 
-Create `test/fixtures/populate-select.js`:
+- [ ] **Step 3: Wire `popup.html`/`popup.js`.**
+  - In `popup.html`: remove the four hardcoded `<option>`s under `#profileSelect` (leave the empty `<select id="profileSelect">`). Before `<script src="recommendations.js">`/`<script src="popup.js">`, add `<script src="vendor/address-schemas.js"></script>`, `<script src="formdata.js"></script>`, `<script src="profile-ui.js"></script>`.
+  - In `popup.js`: on DOM ready, `const { profiles, defaultProfile } = await chrome.storage.local.get(['profiles','defaultProfile']); const list = (profiles && profiles.length) ? profiles : window.SFFormData.DEFAULT_PROFILES; window.SFProfileUI.populateProfileSelect(document, document.getElementById('profileSelect'), list, defaultProfile);`. Update the fill button handlers to include `profileKey: document.getElementById('profileSelect').value` in the message payload sent to the content script.
 
-```js
-;(function (root) {
-  function __sfPopulateProfileSelect(sel, profiles, defaultId) {
-    sel.innerHTML = '';
-    (profiles || []).forEach(p => {
-      const o = root.document.createElement('option');
-      o.value = p.id; o.textContent = p.label || p.id;
-      if (p.id === defaultId) o.selected = true;
-      sel.appendChild(o);
-    });
-    return sel;
-  }
-  root.__sfPopulateProfileSelect = __sfPopulateProfileSelect;
-})(typeof window !== 'undefined' ? window : globalThis);
-```
+- [ ] **Step 4: Run tests to verify they pass** — `node --check popup.js && node test/popup-wiring.test.js` → PASS.
 
-Run before creating: `node test/popup-profiles.test.js` → FAIL. Create fixture → PASS.
-
-- [ ] **Step 3: Wire `popup.js`/`popup.html`**
-
-- In `popup.html`, keep `<select id="profileSelect">` but remove the four hardcoded `<option>`s (they’ll be injected).
-- In `popup.js`, inline the identical `__sfPopulateProfileSelect`, and on load do `chrome.storage.local.get(['profiles','defaultProfile'])` then call it. If `profiles` empty, fall back to `SFFormData.DEFAULT_PROFILES` (load `recommendations.js`-style: add `formdata.js`+`vendor/address-schemas.js` `<script>` tags to `popup.html` before `popup.js`).
-- The fill buttons already send a message to the content script; change the payload to include `profileKey: document.getElementById('profileSelect').value`.
-
-- [ ] **Step 4: Run test + syntax check**
-
-Run: `node --check popup.js && node test/popup-profiles.test.js`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit:**
 
 ```bash
-git add popup.html popup.js test/popup-profiles.test.js test/fixtures/populate-select.js
-git commit -m "feat: popup profile dropdown sourced from storage"
+git add popup.html popup.js test/popup-wiring.test.js
+git commit -m "feat: popup profile dropdown via SFProfileUI from storage"
 ```
 
 ---
 
-## Task 11: `options.js`/`options.html` — profile manager CRUD (list + persistence)
+## Task 13: `options` — profile manager CRUD + dynamic address sub-form
 
-**Files:**
-- Modify: `options.html` (add a "Test Profiles" section: list + editor container)
-- Modify: `options.js` (CRUD over `chrome.storage.local.profiles`)
-- Test: `test/options-crud.test.js`
+**Files:** Modify `options.html`, `options.js`; create `test/options-wiring.test.js`
 
-**Interfaces:**
-- Consumes: `chrome.storage.local` (`profiles`, `defaultProfile`), `window.SFFormData.DEFAULT_PROFILES`.
-- Produces pure helpers on `window`:
-  - `__sfProfilesCreate(profiles, label) → { profiles, id }` (appends a blank profile: AU country, all-groups-on policy, empty pins; id is a slug of label + numeric suffix ensuring uniqueness).
-  - `__sfProfilesClone(profiles, id) → { profiles, id }` (deep-copies, "… (copy)" label, fresh unique id).
-  - `__sfProfilesRename(profiles, id, label) → profiles`.
-  - `__sfProfilesDelete(profiles, id) → profiles` (refuses to delete the last remaining profile — returns unchanged).
-  - `__sfProfilePatch(profiles, id, patch) → profiles` (shallow-merges `country`/`policy`/`pins`).
+**Interfaces:** Consumes `window.SFFormData` (`DEFAULT_PROFILES`, `profilesCreate/Clone/Rename/Delete/profilePatch`), `window.SFProfileUI.renderAddressFields`, `window.SFAddress.listCountries`, `chrome.storage.local`. Adds a "Test Profiles" card: a list (`#profileList`), a "+ New profile" button, and an editor (`#profileEditor`). All mutations go through the `SFFormData` data-ops and persist via `chrome.storage.local.set({ profiles })`. The editor shows: a country `<select>` built from `SFAddress.listCountries()` (option text = `label` "🇦🇺 Australia", value = `code`, preselect profile country); group-toggle checkboxes; and the dynamic address sub-form rendered by `SFProfileUI.renderAddressFields(document, container, country)`, re-rendered on country change (which also `profilePatch`es `country` and persists). Per-field exclude checkboxes and pin inputs update `policy.exclude`/`pins` via `profilePatch`. `options.html` loads `vendor/address-schemas.js`, `formdata.js`, `profile-ui.js` before `options.js`.
 
-- [ ] **Step 1: Write the failing test**
+> The CRUD logic and address rendering are fully unit-tested in Tasks 8 and 9. This task wires them into the options page; the test verifies the wiring contract (scripts loaded in order, the page calls the shared ops), and Task 16 verifies the live UX.
 
-Create `test/options-crud.test.js`:
+- [ ] **Step 1: Write the failing test** — `test/options-wiring.test.js`:
 
 ```js
-const { loadGlobals, ok, eq, done } = require('./harness');
-const win = loadGlobals(['vendor/address-schemas.js', 'formdata.js', 'test/fixtures/profiles-crud.js']);
-const C = win;
-let profiles = JSON.parse(JSON.stringify(win.SFFormData.DEFAULT_PROFILES));
-
-// create
-let r = C.__sfProfilesCreate(profiles, 'My Profile');
-profiles = r.profiles;
-eq(profiles.length, 5, 'create appends');
-ok(profiles.find(p => p.id === r.id), 'new id present');
-eq(profiles.find(p => p.id === r.id).country, 'AU', 'new profile defaults AU');
-
-// clone
-r = C.__sfProfilesClone(profiles, 'us-test');
-profiles = r.profiles;
-eq(profiles.length, 6, 'clone appends');
-ok(profiles.find(p => p.id === r.id).label.indexOf('copy') !== -1, 'clone label tagged');
-
-// rename
-profiles = C.__sfProfilesRename(profiles, r.id, 'Renamed');
-eq(profiles.find(p => p.id === r.id).label, 'Renamed', 'renamed');
-
-// patch
-profiles = C.__sfProfilePatch(profiles, 'au-personal', { country: 'US', pins: { emailDomain: 'x.test' } });
-const ap = profiles.find(p => p.id === 'au-personal');
-eq(ap.country, 'US', 'patched country');
-eq(ap.pins.emailDomain, 'x.test', 'patched pins');
-
-// delete (and last-one guard)
-profiles = C.__sfProfilesDelete(profiles, r.id);
-ok(!profiles.find(p => p.id === r.id), 'deleted');
-let one = [profiles[0]];
-eq(C.__sfProfilesDelete(one, one[0].id).length, 1, 'refuses to delete last profile');
-
-done('options-crud');
+const { ok, done } = require('./harness');
+const fs = require('fs'), path = require('path');
+const html = fs.readFileSync(path.resolve(__dirname, '..', 'options.html'), 'utf8');
+['vendor/address-schemas.js', 'formdata.js', 'profile-ui.js'].forEach(s =>
+  ok(html.indexOf(s) !== -1, `options.html loads ${s}`));
+ok(html.indexOf('profile-ui.js') < html.indexOf('options.js'), 'profile-ui.js before options.js');
+ok(html.indexOf('profileList') !== -1, 'options.html has #profileList');
+ok(html.indexOf('profileEditor') !== -1, 'options.html has #profileEditor');
+const js = fs.readFileSync(path.resolve(__dirname, '..', 'options.js'), 'utf8');
+['profilesCreate','profilesClone','profilesRename','profilesDelete','profilePatch'].forEach(fn =>
+  ok(js.indexOf(fn) !== -1, `options.js uses ${fn}`));
+ok(js.indexOf('renderAddressFields') !== -1, 'options.js uses SFProfileUI.renderAddressFields');
+ok(js.indexOf('listCountries') !== -1, 'options.js builds country picker from listCountries');
+done('options-wiring');
 ```
 
-- [ ] **Step 2: Create the CRUD helper fixture; confirm fail-then-pass**
+- [ ] **Step 2: Run it to verify it fails** — `node test/options-wiring.test.js` → FAIL (scripts/markup absent).
 
-Create `test/fixtures/profiles-crud.js` (canonical; Step 3 inlines the identical functions into `options.js`):
+- [ ] **Step 3: Wire `options.html`/`options.js`.**
+  - In `options.html`: add a "Test Profiles" card containing `<ul id="profileList"></ul>`, a `<button id="newProfileBtn">+ New profile</button>`, and `<div id="profileEditor"></div>`. Add `<script src="vendor/address-schemas.js"></script>`, `<script src="formdata.js"></script>`, `<script src="profile-ui.js"></script>` before `<script src="options.js">` (after `recommendations.js`).
+  - In `options.js`: maintain `let profiles` loaded from storage (fallback `SFFormData.DEFAULT_PROFILES`). `renderList()` paints `#profileList` (each row: select-to-edit, plus clone/rename/delete buttons calling the matching `SFFormData.profiles*` op then `persist()`). `newProfileBtn` → `SFFormData.profilesCreate(profiles, 'New Profile')`. `renderEditor(id)` paints `#profileEditor`: a country `<select>` from `SFAddress.listCountries()`; group-toggle checkboxes bound to `profilePatch(profiles, id, { policy })`; then `SFProfileUI.renderAddressFields(document, addrContainer, profile.country)`. On country change → `profiles = SFFormData.profilePatch(profiles, id, { country }); persist(); SFProfileUI.renderAddressFields(document, addrContainer, country);`. Per-field exclude checkbox / pin input handlers update `policy.exclude` / `pins` via `profilePatch` + `persist()`. `persist()` = `chrome.storage.local.set({ profiles })`.
 
-```js
-;(function (root) {
-  function _slug(s){ return (s||'profile').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,''); }
-  function _uniqueId(profiles, base){
-    let id = base || 'profile', n = 1;
-    const taken = new Set(profiles.map(p => p.id));
-    while (taken.has(id)) { id = `${base}-${n++}`; }
-    return id;
-  }
-  function __sfProfilesCreate(profiles, label){
-    const next = profiles.slice();
-    const id = _uniqueId(next, _slug(label));
-    next.push({ id, label: label || 'New Profile', country: 'AU', randomize: true,
-      policy: { groups: { name:true, contact:true, address:true, account:true, misc:true }, exclude: [] }, pins: {} });
-    return { profiles: next, id };
-  }
-  function __sfProfilesClone(profiles, id){
-    const src = profiles.find(p => p.id === id); if (!src) return { profiles, id: null };
-    const next = profiles.slice();
-    const newId = _uniqueId(next, _slug(src.label) + '-copy');
-    next.push(Object.assign(JSON.parse(JSON.stringify(src)), { id: newId, label: src.label + ' (copy)' }));
-    return { profiles: next, id: newId };
-  }
-  function __sfProfilesRename(profiles, id, label){
-    return profiles.map(p => p.id === id ? Object.assign({}, p, { label }) : p);
-  }
-  function __sfProfilesDelete(profiles, id){
-    if (profiles.length <= 1) return profiles;
-    return profiles.filter(p => p.id !== id);
-  }
-  function __sfProfilePatch(profiles, id, patch){
-    return profiles.map(p => p.id === id ? Object.assign({}, p, patch) : p);
-  }
-  Object.assign(root, { __sfProfilesCreate, __sfProfilesClone, __sfProfilesRename, __sfProfilesDelete, __sfProfilePatch });
-})(typeof window !== 'undefined' ? window : globalThis);
-```
+- [ ] **Step 4: Run tests to verify they pass** — `node --check options.js && node test/options-wiring.test.js` → PASS.
 
-Run before creating: `node test/options-crud.test.js` → FAIL. Create fixture → PASS.
-
-- [ ] **Step 3: Wire `options.html`/`options.js`**
-
-- In `options.html`, add a "Test Profiles" card: a `<ul id="profileList">`, a "+ New profile" button, and a `<div id="profileEditor">` placeholder. Add `<script src="vendor/address-schemas.js">` and `<script src="formdata.js">` before `options.js`.
-- In `options.js`, inline the five CRUD helpers (identical to the fixture), load `profiles` from storage (fall back to `SFFormData.DEFAULT_PROFILES`), render the list, and persist (`chrome.storage.local.set({ profiles })`) after every mutation. Wire New/Clone/Rename/Delete buttons. Selecting a list item renders the editor (Task 12 adds the dynamic address fields; for this task the editor can show label + country `<select>` + group-toggle checkboxes bound through `__sfProfilePatch`).
-
-- [ ] **Step 4: Run tests + syntax check**
-
-Run: `node --check options.js && node test/options-crud.test.js`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit:**
 
 ```bash
-git add options.html options.js test/options-crud.test.js test/fixtures/profiles-crud.js
-git commit -m "feat: options profile manager CRUD over storage"
+git add options.html options.js test/options-wiring.test.js
+git commit -m "feat: options profile manager CRUD + dynamic per-country address fields"
 ```
 
 ---
 
-## Task 12: `options.js` — dynamic per-country address sub-form
+## Task 14: `manifest.json` + integration wiring & full check
 
-**Files:**
-- Modify: `options.js` (profile editor: render address fields from the schema)
-- Test: `test/options-address-form.test.js`
+**Files:** Modify `manifest.json`, `popup.html`, `popup.js` version badge; create `test/manifest-integration.test.js`
 
-**Interfaces:**
-- Consumes: `window.SFAddress.getFieldConfig`, `getZipHint`, `listCountries`, `countryCodeToFlagEmoji`.
-- Produces `window.__sfRenderAddressFields(container, country) → void` that, given a DOM container and a country code, renders one labelled input per **shown** address field (`street1, street2, city, state, zip`) in `getFieldConfig(country).order` order, using the country-specific `label`, a `required` marker, and the zip hint. Re-invoking with a new country replaces the fields.
+**Interfaces:** `manifest.json` `content_scripts[0].js` = `["vendor/address-schemas.js", "formdata.js", "profile-ui.js", "content.js"]` (in that order); `version` = `1.1.0`.
 
-- [ ] **Step 1: Write the failing test**
-
-Create `test/options-address-form.test.js`:
+- [ ] **Step 1: Write the failing test** — `test/manifest-integration.test.js`:
 
 ```js
-const { loadGlobals, ok, eq, done } = require('./harness');
-const win = loadGlobals(['vendor/address-schemas.js', 'test/fixtures/render-address.js'],
-  '<!DOCTYPE html><body><div id="c"></div></body>');
-const c = win.document.getElementById('c');
-
-win.__sfRenderAddressFields(c, 'AU');
-let labels = Array.from(c.querySelectorAll('label')).map(l => l.textContent);
-ok(labels.some(t => t.indexOf('Suburb') !== -1), 'AU shows Suburb');
-ok(labels.some(t => t.indexOf('State/Territory') !== -1), 'AU shows State/Territory');
-ok(labels.some(t => t.indexOf('Postcode') !== -1), 'AU shows Postcode');
-
-win.__sfRenderAddressFields(c, 'US');
-labels = Array.from(c.querySelectorAll('label')).map(l => l.textContent);
-ok(labels.some(t => t.indexOf('City') !== -1), 'US shows City after re-render');
-ok(labels.some(t => t.indexOf('ZIP') !== -1), 'US shows ZIP');
-ok(!labels.some(t => t.indexOf('Suburb') !== -1), 'AU fields cleared on re-render');
-
-done('options-address-form');
-```
-
-- [ ] **Step 2: Create the render fixture; confirm fail-then-pass**
-
-Create `test/fixtures/render-address.js` (canonical; Step 3 inlines the identical function into `options.js`):
-
-```js
-;(function (root) {
-  const ADDR_KEYS_BY_GROUP = { street: ['street1', 'street2'], city: ['city'], state: ['state'], zip: ['zip'] };
-  function __sfRenderAddressFields(container, country) {
-    const A = root.SFAddress;
-    const cfg = A.getFieldConfig(country);
-    container.innerHTML = '';
-    cfg.order.forEach(group => {
-      (ADDR_KEYS_BY_GROUP[group] || []).forEach(key => {
-        const f = cfg.fields[key];
-        if (!f || !f.show) return;
-        const wrap = root.document.createElement('div');
-        const label = root.document.createElement('label');
-        label.textContent = f.label + (f.required ? ' *' : '');
-        const input = root.document.createElement('input');
-        input.setAttribute('data-field', key);
-        if (key === 'zip') { const h = A.getZipHint(country); if (h) input.setAttribute('placeholder', h); }
-        wrap.appendChild(label); wrap.appendChild(input); container.appendChild(wrap);
-      });
-    });
-  }
-  root.__sfRenderAddressFields = __sfRenderAddressFields;
-})(typeof window !== 'undefined' ? window : globalThis);
-```
-
-Run before creating: `node test/options-address-form.test.js` → FAIL. Create fixture → PASS.
-
-- [ ] **Step 3: Wire into the `options.js` editor**
-
-- Inline the identical `__sfRenderAddressFields` into `options.js`.
-- Build the country `<select>` from `SFAddress.listCountries()` (each option text = `label`, i.e. "🇦🇺 Australia"; value = `code`); preselect the profile’s `country`.
-- On country `change`: call `__sfProfilePatch(profiles, id, { country })`, persist, and re-render the address sub-form. (The state value still flows into the fill engine’s combobox/vue-select path unchanged.)
-- Per-field **exclude** checkboxes and **pin** inputs sit beside each rendered field; their changes call `__sfProfilePatch` to update `policy.exclude` / `pins` and persist. (Reuse the gating vocabulary; `street1↔address` etc. via `SFFormData.groupForField`.)
-
-- [ ] **Step 4: Run tests + syntax check**
-
-Run: `node --check options.js && node test/options-address-form.test.js && node test/options-crud.test.js`
-Expected: all PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add options.html options.js test/options-address-form.test.js test/fixtures/render-address.js
-git commit -m "feat: dynamic per-country address fields in profile editor"
-```
-
----
-
-## Task 13: `manifest.json` + integration wiring & full check
-
-**Files:**
-- Modify: `manifest.json` (content-script load order, version bump)
-- Modify: `popup.html`, `options.html` (confirm script tags from Tasks 10–12)
-- Test: `test/manifest-integration.test.js`
-
-**Interfaces:**
-- Consumes: nothing new.
-- Produces: `manifest.json` `content_scripts[0].js` = `["vendor/address-schemas.js", "formdata.js", "content.js"]` (in that order); `version` bumped to `1.1.0`. `popup.html`/`options.html` include `vendor/address-schemas.js` + `formdata.js` before their own scripts.
-
-- [ ] **Step 1: Write the failing test**
-
-Create `test/manifest-integration.test.js`:
-
-```js
-const fs = require('fs'); const path = require('path');
+const fs = require('fs'), path = require('path');
 const { ok, eq, done } = require('./harness');
 const root = path.resolve(__dirname, '..');
 const m = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
-
-eq(m.content_scripts[0].js, ['vendor/address-schemas.js', 'formdata.js', 'content.js'], 'content script load order');
+eq(m.content_scripts[0].js,
+  ['vendor/address-schemas.js', 'formdata.js', 'profile-ui.js', 'content.js'], 'content script load order');
 eq(m.version, '1.1.0', 'version bumped');
-
 const popup = fs.readFileSync(path.join(root, 'popup.html'), 'utf8');
-ok(popup.indexOf('vendor/address-schemas.js') !== -1 && popup.indexOf('formdata.js') !== -1, 'popup loads new scripts');
-const options = fs.readFileSync(path.join(root, 'options.html'), 'utf8');
-ok(options.indexOf('vendor/address-schemas.js') !== -1 && options.indexOf('formdata.js') !== -1, 'options loads new scripts');
-
+ok(popup.indexOf('v1.1.0') !== -1, 'popup version badge bumped');
 done('manifest-integration');
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 2: Run it to verify it fails** — `node test/manifest-integration.test.js` → FAIL on the load-order assertion.
 
-Run: `node test/manifest-integration.test.js`
-Expected: FAIL on the `content_scripts` ordering assertion (still `["content.js"]`).
-
-- [ ] **Step 3: Update `manifest.json`**
-
-Set:
+- [ ] **Step 3: Update `manifest.json`:**
 
 ```json
   "version": "1.1.0",
   "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["vendor/address-schemas.js", "formdata.js", "content.js"],
-      "run_at": "document_idle",
-      "all_frames": false
-    }
+    { "matches": ["<all_urls>"],
+      "js": ["vendor/address-schemas.js", "formdata.js", "profile-ui.js", "content.js"],
+      "run_at": "document_idle", "all_frames": false }
   ],
 ```
 
-Also bump the `popup.html` version badge text to `v1.1.0`. Confirm the `<script>` tags added in Tasks 10–12 are present in `popup.html` and `options.html` (add if missing).
+Bump the `popup.html` version badge text to `v1.1.0`.
 
-- [ ] **Step 4: Run the whole suite + syntax checks**
-
-Run:
+- [ ] **Step 4: Run the whole suite + syntax checks:**
 
 ```bash
-for f in vendor/address-schemas.js formdata.js content.js background.js popup.js options.js seed-data.node.js; do node --check "$f" || exit 1; done
+for f in vendor/address-schemas.js formdata.js profile-ui.js content.js background.js popup.js options.js seed-data.node.js; do node --check "$f" || exit 1; done
 for f in test/*.test.js test/harness.selftest.js; do node "$f" || exit 1; done
-node test/manifest-integration.test.js
 ```
 
 Expected: every `node --check` silent; every test prints `✓ … 0 failed`; final exit 0.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit:**
 
 ```bash
-git add manifest.json popup.html options.html test/manifest-integration.test.js
-git commit -m "feat: register formdata/address content scripts; bump to v1.1.0"
+git add manifest.json popup.html test/manifest-integration.test.js
+git commit -m "feat: register address/formdata/profile-ui content scripts; bump to v1.1.0"
 ```
 
 ---
 
-## Task 14: Manual verification on the live form
+## Task 15: Manual verification on the live form
 
 **Files:** none (manual QA + notes)
 
-- [ ] **Step 1:** Load the unpacked extension (reload at `chrome://extensions`) and open `https://vinum-dev.pos.dev.z42z.com/`.
-- [ ] **Step 2:** Open Options → Test Profiles. Confirm the four seeded profiles list; create/clone/rename/delete works and persists across a reload. Switch a profile’s country AU↔US and confirm the address fields + labels (Suburb/State-Territory/Postcode vs City/State/ZIP) re-render.
-- [ ] **Step 3:** On the create-customer modal, click the form-icon → **Fill name**: only name/contact fill, address stays empty. Click **Fill address**: address (incl. country/state vue-select) fills coherently. **Fill all**: everything per the profile policy. Verify two consecutive **Fill all** runs produce *different* names/addresses (randomization) and that the country→state cascade still resolves.
-- [ ] **Step 4:** Set a profile `exclude: ['email']` and a `pins.emailDomain`; confirm a fill leaves email blank when excluded, and (with email enabled) uses the pinned domain.
-- [ ] **Step 5:** If a state/region option text doesn’t match generated data for some country, note it for a `VALUE_ALIASES`/pool follow-up (do not expand scope here). Record results in the PR/commit notes.
+- [ ] **Step 1:** Reload the unpacked extension (`chrome://extensions`) and open `https://vinum-dev.pos.dev.z42z.com/`.
+- [ ] **Step 2:** Options → Test Profiles: confirm the four seeded profiles list; create/clone/rename/delete persists across reload. Switch a profile's country AU↔US and confirm the address fields + labels (Suburb/State-Territory/Postcode vs City/State/ZIP) re-render.
+- [ ] **Step 3:** On the create-customer modal, click the form-icon → **Fill name** (only name/contact fill, address empty); **Fill address** (address + country/state vue-select fill coherently); **Fill all** (everything per policy). Run **Fill all** twice — names/addresses differ (randomization) and the country→state cascade still resolves.
+- [ ] **Step 4:** Set a profile `exclude: ['email']` + `pins.emailDomain`; confirm a fill leaves email blank when excluded, and (email enabled) uses the pinned domain.
+- [ ] **Step 5:** If a state/region option text doesn't match generated data for some country, note it for a `VALUE_ALIASES`/pool follow-up (do not expand scope here). Record results in the commit/PR notes.
 
 ---
 
 ## Self-Review Notes (author)
 
-- **Spec coverage:** Data model → Tasks 3,6,11. Vendored address model → Task 2. Generator + pools → Tasks 4,5. Policy gate + selective fill → Tasks 6,8. Form-icon menu → Task 9. Popup dropdown → Task 10. Options CRUD → Task 11. Dynamic per-country address fields → Task 12. Seeding/migration → Task 7. Manifest/load-order → Task 13. Testing → every task + Task 14 manual. Uniquifier retirement → Task 8.
-- **Drift risk:** seed data exists in `formdata.js`, `seed-data.node.js`, and inline in `background.js` (service-worker module can’t share a classic global). Task 7’s `seed-drift.test.js` guards id/version parity across all three.
-- **Naming consistency:** `shouldFill`, `generatePerson`, `applyPins`, `toEngineValues`, `MENU_ONLY`, `__sfApplyPolicy`, `__sfBuildMenu`, `__sfRenderAddressFields`, `__sfProfiles*` are used identically across the tasks that define and consume them.
+- **Spec coverage:** data model → Tasks 3,6,8; vendored address model → Task 2; generator + pools → Tasks 4,5; policy gate + selective fill → Tasks 6,10; form-icon menu → Tasks 9,11; popup dropdown → Tasks 9,12; options CRUD + dynamic address → Tasks 8,9,13; seeding/migration → Task 7; manifest/load-order → Task 14; testing → every task + Task 15 manual; uniquifier retirement → Task 10.
+- **No duplicated production logic:** every pure/DOM helper has one home (`formdata.js` or `profile-ui.js` or `vendor/`); consumers call it; tests load the real module. Sole exception: the seed array (Task 7), guarded by `seed-drift.test.js`.
+- **Naming consistency:** `shouldFill`, `applyPolicy`, `resolveValues`, `generatePerson`, `applyPins`, `toEngineValues`, `MENU_ONLY`, `profilesCreate/Clone/Rename/Delete`, `profilePatch`, `SFProfileUI.buildMenu/populateProfileSelect/renderAddressFields`, `loadProfile`/`__sfLoadProfile`, `__sfMenuOnlyFor` are defined once and referenced identically by their consumers.
