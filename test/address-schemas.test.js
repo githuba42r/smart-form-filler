@@ -20,5 +20,7 @@ eq(A.countryCodeToFlagEmoji('AU'), '\u{1F1E6}\u{1F1FA}', 'AU flag emoji');
 const list = A.listCountries();
 ok(list.length >= 30, 'at least 30 countries ported');
 ok(list.some(c => c.code === 'AU' && c.label.indexOf('Australia') !== -1), 'AU in list with name');
+const names = A.listCountries().map(c => c.name);
+ok(new Set(names).size === names.length, 'listCountries has no duplicate names');
 ok(A.getFieldConfig('ZZ').fields.street1.show, 'unknown country still shows street');
 done('address-schemas');

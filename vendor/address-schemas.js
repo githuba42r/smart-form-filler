@@ -507,7 +507,13 @@
 
   // ----- new helper for the options country picker -----
   function listCountries() {
-    return Object.keys(ADDRESS_SCHEMAS).map(code => {
+    const seen = new Set();
+    return Object.keys(ADDRESS_SCHEMAS).filter(code => {
+      const s = ADDRESS_SCHEMAS[code];
+      if (seen.has(s)) return false;
+      seen.add(s);
+      return true;
+    }).map(code => {
       const flag = countryCodeToFlagEmoji(code === 'UK' ? 'GB' : code);
       const name = ADDRESS_SCHEMAS[code].name || code;
       return { code, name, flag, label: flag ? `${flag} ${name}` : name };
