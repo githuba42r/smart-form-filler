@@ -1,0 +1,10 @@
+{
+  "name": "smart-form-filler-extension",
+  "version": "1.0.1",
+  "private": true,
+  "description": "Dev-only tooling/tests for the SmartForm Filler extension (not shipped).",
+  "scripts": {
+    "test": "for f in test/*.test.js test/harness.selftest.js; do echo \"== $f ==\"; node \"$f\" || exit 1; done"
+  },
+  "devDependencies": { "jsdom": "^24.0.0" }
+}
