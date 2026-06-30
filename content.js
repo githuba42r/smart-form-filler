@@ -1075,4 +1075,223 @@
   } else {
     initFormIcons();
   }
+
+  // ============================================================
+  // Capture + AI-assisted fill helpers
+  // ============================================================
+
+  /**
+   * Read the current values of all named/id'd form controls on the page.
+   * Returns { fieldName: value } — undefined for unchecked checkboxes/radios.
+   */
+  function readFormValuesFromPage() {
+    const values = {};
+    document.querySelectorAll('input, select, textarea').forEach(el => {
+      if (el.name || el.id) {
+        const key = el.name || el.id;
+        if (el.type === 'checkbox' || el.type === 'radio') {
+          values[key] = el.checked ? el.value : undefined;
+        } else {
+          values[key] = el.value || undefined;
+        }
+      }
+    });
+    return values;
+  }
+
+  /**
+   * Load the active (default) profile from storage, falling back to built-ins.
+   */
+  async function getActiveProfile() {
+    const data = await chrome.storage.local.get(['defaultProfile', 'profiles']);
+    const profileKey = data.defaultProfile || null;
+    const profiles = (data.profiles && data.profiles.length) ? data.profiles : window.SFFormData.DEFAULT_PROFILES;
+    if (profileKey) {
+      const found = profiles.find(p => p.id === profileKey);
+      if (found) return found;
+    }
+    return profiles[0];
+  }
+
+  /**
+   * Capture the current form state as a form-specific profile object.
+   * Accepts options for test mocking:
+   *   options.mockDetectedFields  — bypass SFAIDetector.detectFormFields()
+   *   options.mockReadFormValues  — bypass readFormValuesFromPage()
+   *   options.mockActiveProfile   — bypass getActiveProfile()
+   *   options.pageTitle           — override document.title
+   *
+   * In production, saves the new profile to chrome.storage.local and alerts the user.
+   * In test mode (mockDetectedFields present), returns the profile object directly.
+   */
+  window.__sfCaptureFormAsProfile = async function(options = {}) {
+    if (options.mockDetectedFields) {
+      // Test / mock path
+      const detectedFields = options.mockDetectedFields.fields;
+      const readValues = options.mockReadFormValues || {};
+      const activeProfile = options.mockActiveProfile || (await getActiveProfile());
+      const formUrl = (typeof window.location !== 'undefined' && window.location.href) || 'http://localhost/';
+      const formSignature = options.mockDetectedFields.formSignature;
+      const pageTitle = options.pageTitle || (typeof document !== 'undefined' ? document.title : '');
+
+      let origin, pathname;
+      try { const u = new URL(formUrl); origin = u.origin; pathname = u.pathname; }
+      catch (_) { origin = 'http://localhost'; pathname = '/'; }
+
+      const newProfile = {
+        id: 'form-' + Date.now(),
+        label: pageTitle.substring(0, 20) + ' - ' + (origin.replace(/^https?:\/\//, '') || 'localhost'),
+        country: activeProfile.country,
+        randomize: true,
+        policy: activeProfile.policy,
+        pins: activeProfile.pins,
+        formMetadata: {
+          urlPattern: origin + pathname,
+          formSignature: formSignature,
+          capturedAt: new Date().toISOString()
+        },
+        fields: detectedFields.map(field => ({
+          key: field.detectedType,
+          htmlName: field.htmlName,
+          htmlType: field.htmlType,
+          label: field.label || '',
+          detectedType: field.detectedType,
+          mode: !field.isSafe ? 'excluded' : (readValues[field.htmlName] ? 'pinned' : 'generated'),
+          value: readValues[field.htmlName] || undefined,
+          safetyLevel: field.isSafe ? 'low' : 'high'
+        }))
+      };
+      return newProfile;
+    }
+
+    // Production path
+    const detected = await window.SFAIDetector.detectFormFields();
+    if (detected.error || !detected.fields) {
+      console.warn('[SmartForm] Field detection failed:', detected.error);
+      return null;
+    }
+
+    const readValues = readFormValuesFromPage();
+    const activeProfile = await getActiveProfile();
+
+    const formUrl = window.location.href;
+    let origin, pathname;
+    try { const u = new URL(formUrl); origin = u.origin; pathname = u.pathname; }
+    catch (_) { origin = 'http://localhost'; pathname = '/'; }
+
+    const newProfile = {
+      id: 'form-' + Date.now(),
+      label: document.title.substring(0, 20) + ' - ' + origin.replace(/^https?:\/\//, ''),
+      country: activeProfile.country,
+      randomize: true,
+      policy: activeProfile.policy,
+      pins: activeProfile.pins,
+      formMetadata: {
+        urlPattern: origin + pathname,
+        formSignature: detected.formSignature,
+        capturedAt: new Date().toISOString()
+      },
+      fields: detected.fields.map(field => ({
+        key: field.detectedType,
+        htmlName: field.htmlName,
+        htmlType: field.htmlType,
+        label: field.label || '',
+        detectedType: field.detectedType,
+        mode: !field.isSafe ? 'excluded' : (readValues[field.htmlName] ? 'pinned' : 'generated'),
+        value: readValues[field.htmlName] || undefined,
+        safetyLevel: field.isSafe ? 'low' : 'high'
+      }))
+    };
+
+    // Save to storage
+    const storageData = await chrome.storage.local.get(['profiles']);
+    const profiles = storageData.profiles || [];
+    profiles.push(newProfile);
+    await chrome.storage.local.set({ profiles });
+
+    alert('Profile captured: ' + newProfile.label + '. Edit in Options to refine.');
+    return newProfile;
+  };
+
+  /**
+   * Resolve a single field's value against a profile.
+   * Priority:
+   *  1. Form-specific field config (pinned / generated / excluded / empty)
+   *  2. Standard canonical field via SFFormData.resolveValues + policy gate
+   *  3. AI-generated custom field value
+   */
+  async function resolveFieldValue(field, profile, opts) {
+    opts = opts || {};
+
+    // 1. Form-specific field config
+    if (profile.fields) {
+      const fieldConfig = profile.fields.find(f => f.htmlName === field.htmlName);
+      if (fieldConfig) {
+        if (fieldConfig.mode === 'pinned') return fieldConfig.value;
+        if (fieldConfig.mode === 'generated') return await window.SFAIDetector.generateCustomFieldValue(field);
+        if (fieldConfig.mode === 'empty' || fieldConfig.mode === 'excluded') return undefined;
+      }
+    }
+
+    // 2. Standard canonical field via policy gate
+    if (isStandardCanonicalField(field.detectedType)) {
+      if (shouldFillField(field.detectedType, profile.policy, opts.only)) {
+        const allValues = window.SFFormData.resolveValues(profile, opts.only || null);
+        return allValues[field.detectedType];
+      }
+      return undefined;
+    }
+
+    // 3. Custom / unknown field: AI generation
+    return await window.SFAIDetector.generateCustomFieldValue(field);
+  }
+  window.__sfResolveFieldValue = resolveFieldValue;
+
+  /**
+   * Returns true if a detectedType string is one of the canonical field keys
+   * supported by SFFormData.resolveValues.
+   */
+  function isStandardCanonicalField(type) {
+    const standard = [
+      'firstname', 'lastname', 'fullname', 'username', 'email', 'phone',
+      'street1', 'street2', 'city', 'state', 'zip', 'country',
+      'business', 'password', 'dob', 'generictext',
+      // Plan camelCase variants (content may receive these from AI detector)
+      'firstName', 'lastName', 'fullName', 'street1', 'street2',
+      'genericText', 'company'
+    ];
+    return standard.includes(type);
+  }
+
+  /**
+   * Returns true if the canonical field key should be filled given the profile
+   * policy and any transient `only` (group-filter) override.
+   */
+  function shouldFillField(canonicalKey, policy, only) {
+    if (!policy) return true;
+    const group = window.SFFormData.groupForField ? window.SFFormData.groupForField(canonicalKey) : null;
+    if (group && policy.groups && policy.groups[group] === false) return false;
+    if (policy.exclude && policy.exclude.includes(canonicalKey)) return false;
+    if (only && group && !only.includes(group)) return false;
+    return true;
+  }
+
+  /**
+   * Write a { fieldName: value } map to matching DOM form controls.
+   * Dispatches change events so React/Vue/Angular pick up the mutations.
+   */
+  function fillFormWithValues(valuesToFill) {
+    for (const [fieldName, value] of Object.entries(valuesToFill)) {
+      const elements = document.querySelectorAll('[name="' + fieldName + '"], [id="' + fieldName + '"]');
+      elements.forEach(el => {
+        if (el.type === 'checkbox' || el.type === 'radio') {
+          el.checked = value === el.value;
+        } else {
+          el.value = value;
+        }
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+    }
+  }
 })();
