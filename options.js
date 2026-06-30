@@ -589,11 +589,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       cloneBtn.className = 'btn btn-secondary';
       cloneBtn.style.fontSize = '12px';
       cloneBtn.addEventListener('click', async () => {
-        profiles = SFFormData.profilesClone(profiles, profile.id);
+        const r = SFFormData.profilesClone(profiles, profile.id);
+        profiles = r.profiles;
         await persistProfiles();
         renderList();
-        const cloned = profiles[profiles.length - 1];
-        if (cloned) renderEditor(cloned.id);
+        renderEditor(r.id);
       });
 
       const renameBtn = document.createElement('button');
@@ -752,7 +752,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Wrap each field with exclude checkbox and pin input
       const policy = profile.policy || {};
       const exclude = policy.exclude || [];
-      const pins = policy.pins || {};
+      const pins = profile.pins || {};
 
       Array.from(addrContainer.querySelectorAll('[data-field]')).forEach(input => {
         const fieldKey = input.getAttribute('data-field');
@@ -796,8 +796,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         pinInput.style.cssText = 'flex: 1; padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 13px; margin-bottom: 0;';
         pinInput.addEventListener('change', async () => {
           const newPins = { ...pins, [fieldKey]: pinInput.value };
-          const newPolicy = { ...policy, pins: newPins };
-          profiles = SFFormData.profilePatch(profiles, id, { policy: newPolicy });
+          profiles = SFFormData.profilePatch(profiles, id, { pins: newPins });
           await persistProfiles();
         });
         pinWrap.appendChild(pinLabel);
@@ -814,11 +813,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   const newProfileBtn = document.getElementById('newProfileBtn');
   if (newProfileBtn) {
     newProfileBtn.addEventListener('click', async () => {
-      profiles = SFFormData.profilesCreate(profiles, 'New Profile');
+      const r = SFFormData.profilesCreate(profiles, 'New Profile');
+      profiles = r.profiles;
       await persistProfiles();
       renderList();
-      const newProfile = profiles[profiles.length - 1];
-      if (newProfile) renderEditor(newProfile.id);
+      renderEditor(r.id);
     });
   }
 

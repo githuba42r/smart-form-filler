@@ -291,7 +291,7 @@ async function seedProfiles(store) {
 
 // Optional: on install, set some defaults
 chrome.runtime.onInstalled.addListener((details) => {
-  if (details.reason === 'install') {
+  if (details.reason === 'install' || details.reason === 'update') {
     seedProfiles({ get: (k) => chrome.storage.local.get(k), set: (o) => chrome.storage.local.set(o) });
     chrome.storage.local.set({
       ollamaUrl: DEFAULT_OLLAMA_URL,

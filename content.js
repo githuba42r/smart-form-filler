@@ -380,12 +380,6 @@
     };
   }
 
-  // Category groups offered in the inline fill menu.
-  const FIELD_GROUPS = {
-    name: ['firstName', 'lastName', 'fullName', 'username', 'email', 'phone', 'dob', 'password', 'company'],
-    address: ['address1', 'address2', 'city', 'state', 'postcode', 'country']
-  };
-
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
   // Is a control currently empty (and therefore needs filling)? A <select> whose
@@ -721,22 +715,6 @@
   function __sfMenuOnlyFor(key) { return window.SFFormData.MENU_ONLY[key]; }
   window.__sfMenuOnlyFor = __sfMenuOnlyFor;
 
-  // Convert formdata canonical group names to engine field names for fillWithProfile filtering.
-  function groupsToEngineFields(formDataGroups) {
-    if (!formDataGroups || !Array.isArray(formDataGroups)) return null;
-    const fields = [];
-    const CANONICAL_TO_ENGINE = window.SFFormData.CANONICAL_TO_ENGINE;
-    const FORMDATA_GROUPS = window.SFFormData.FIELD_GROUPS; // formdata's FIELD_GROUPS use canonical names
-    formDataGroups.forEach(groupName => {
-      const canonicalNames = FORMDATA_GROUPS[groupName] || [];
-      canonicalNames.forEach(canonical => {
-        const engineName = CANONICAL_TO_ENGINE[canonical];
-        if (engineName && !fields.includes(engineName)) fields.push(engineName);
-      });
-    });
-    return fields.length > 0 ? fields : null;
-  }
-
   /**
    * Fill using an explicit map of {index: value} provided (usually from AI).
    */
@@ -957,9 +935,7 @@
   }
 
   function runMenuAction(only, profileId) {
-    // Convert formdata canonical group names to engine field names for fillWithProfile.
-    const categories = groupsToEngineFields(only);
-    const res = fillWithProfile(profileId, { categories, unique: true });
+    const res = fillWithProfile(profileId, { only, unique: true });
     if (res && res.then) {
       // fillWithProfile is async
       res.then(result => {
