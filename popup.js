@@ -45,9 +45,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Load saved settings + last used profile
   async function loadSettings() {
     const data = await chrome.storage.local.get([
-      'defaultProfile', 'provider', 'ollamaUrl', 'ollamaModel', 'openrouterModel', 'aiEnabled'
+      'profiles', 'defaultProfile', 'provider', 'ollamaUrl', 'ollamaModel', 'openrouterModel', 'aiEnabled'
     ]);
-    if (data.defaultProfile) profileSelect.value = data.defaultProfile;
+
+    // Load and populate profiles
+    const profileList = (data.profiles && data.profiles.length) ? data.profiles : window.SFFormData.DEFAULT_PROFILES;
+    window.SFProfileUI.populateProfileSelect(document, profileSelect, profileList, data.defaultProfile);
+
     if (data.provider) aiConfig.provider = data.provider;
     if (data.ollamaUrl) aiConfig.ollamaUrl = data.ollamaUrl;
     if (data.ollamaModel) aiConfig.model = data.ollamaModel;
