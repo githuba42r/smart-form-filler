@@ -597,6 +597,20 @@
    * re-asserted afterwards — replicating the form's manual address-entry path.
    */
   async function fillWithProfile(profileKey, opts = {}) {
+    const F = window.SFFormData;
+    const profile = await loadProfile(profileKey);
+
+    // AI-powered path: active when SFAIDetector + SFFormRegistry are both loaded
+    if (window.SFAIDetector && window.SFFormRegistry) {
+      try {
+        return await _fillWithAI(profile, opts, F);
+      } catch (e) {
+        dbg('AI fill error, falling back to heuristics:', e);
+        // Fall through to original heuristic path below
+      }
+    }
+
+    // Original heuristic path (unchanged)
     scanForms();
     if (!detectedFields.length) {
       return { success: false, message: 'No fillable fields detected on page.' };
@@ -604,8 +618,6 @@
     dbg('fill: detected fields →', detectedFields.map(f =>
       `${f.label || f.name || f.type}[${getFieldCategory(f) || '?'}${isAutocompleteInput(f.element) ? ',auto' : ''}]`).join('  '));
 
-    const F = window.SFFormData;
-    const profile = await loadProfile(profileKey);
     const values = F.resolveValues(profile, (opts && opts.only) || null);
 
     const handled = new Set();
@@ -742,6 +754,274 @@
       message: `AI-assisted fill completed for ${filledCount} fields.`
     };
   }
+
+  // ============================================================
+  // AI-powered capture + fill (Task 4)
+  // ============================================================
+
+  /**
+   * Read current form values from all named inputs on the page.
+   * Returns a flat { name: value } map.
+   */
+  function readFormValuesFromPage() {
+    const values = {};
+    document.querySelectorAll('input, select, textarea').forEach(function (el) {
+      const key = el.name || el.id;
+      if (!key) return;
+      const t = (el.type || '').toLowerCase();
+      if (t === 'submit' || t === 'button' || t === 'reset' || t === 'image' || t === 'hidden') return;
+      values[key] = (t === 'checkbox' || t === 'radio') ? el.checked : el.value;
+    });
+    return values;
+  }
+
+  /** Load the currently-active profile (defaultProfile or first). */
+  function getActiveProfile() { return loadProfile(null); }
+
+  /** Compute origin+pathname without requiring SFFormRegistry. */
+  function _localURLPattern(url) {
+    try { const p = new URL(url); return p.origin + p.pathname; } catch (_) { return url || ''; }
+  }
+
+  /**
+   * Determine what value to fill for a single AI-detected field.
+   *
+   * Priority:
+   *   1. Form-specific profile field config  (mode: pinned | generated | empty | excluded)
+   *   2. Standard canonical field            → look up in pre-resolved standardValues
+   *   3. Custom / unknown field              → call SFAIDetector.generateCustomFieldValue
+   *
+   * @param {object} field          AI-detected field { htmlName, detectedType, ... }
+   * @param {object} profile        Active profile (generic or form-specific)
+   * @param {object} opts           Fill options (opts.only for group filter)
+   * @param {object} standardValues Pre-resolved values from F.resolveValues()
+   * @returns {Promise<any>}        Value to fill, or undefined to skip the field
+   */
+  async function resolveFieldValue(field, profile, opts, standardValues) {
+    const F          = window.SFFormData;
+    const htmlName   = field.htmlName || field.name || '';
+    const detectedType = (field.detectedType || '').toLowerCase();
+
+    // ── Form-specific profile: per-field config (fields array) ──────────────
+    if (profile && Array.isArray(profile.fields) && profile.fields.length) {
+      const fieldConfig = profile.fields.find(function (f) { return f.htmlName === htmlName; });
+      if (fieldConfig) {
+        // Transient only-filter applies even to form-specific fields
+        if (opts && opts.only && detectedType && detectedType !== 'custom') {
+          const group = F.groupForField(detectedType);
+          if (group && opts.only.indexOf(group) === -1) return undefined;
+        }
+        if (fieldConfig.mode === 'pinned')    return fieldConfig.value;
+        if (fieldConfig.mode === 'generated') {
+          return window.SFAIDetector
+            ? await window.SFAIDetector.generateCustomFieldValue(field)
+            : undefined;
+        }
+        return undefined; // empty | excluded | unknown mode → skip
+      }
+    }
+
+    // ── Standard canonical field → standardValues (policy + only pre-applied) ─
+    if (detectedType && detectedType !== 'custom') {
+      const engineKey = F && F.CANONICAL_TO_ENGINE && F.CANONICAL_TO_ENGINE[detectedType];
+      if (engineKey) {
+        return (standardValues && standardValues[engineKey] !== undefined)
+          ? standardValues[engineKey]
+          : undefined;
+      }
+    }
+
+    // ── Custom / unknown field → AI generation ──────────────────────────────
+    if (window.SFAIDetector) {
+      return await window.SFAIDetector.generateCustomFieldValue(field);
+    }
+    return undefined;
+  }
+
+  /**
+   * Apply a { htmlName: value } map to DOM elements.
+   * Used by the AI-powered fill path; simpler than the multi-pass heuristic fill.
+   *
+   * @param {object} valuesToFill
+   * @returns {number} Number of fields successfully filled
+   */
+  async function fillFormWithValues(valuesToFill) {
+    let filledCount = 0;
+    const keys = Object.keys(valuesToFill || {});
+    for (let i = 0; i < keys.length; i++) {
+      const htmlName = keys[i];
+      const value    = valuesToFill[htmlName];
+      if (value === undefined || value === null) continue;
+      let el = null;
+      try {
+        el = document.querySelector('[name="' + htmlName.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"]')
+          || document.getElementById(htmlName);
+      } catch (_) {}
+      if (!el) continue;
+      if (applyValueToElement(el, value)) filledCount++;
+    }
+    return filledCount;
+  }
+
+  /**
+   * AI-powered fill — resolves values for every AI-detected field and writes them to the DOM.
+   * Called from fillWithProfile when SFAIDetector + SFFormRegistry are loaded.
+   */
+  async function _fillWithAI(loadedProfile, opts, F) {
+    // Collect all fillable controls (no visibility check so JSDOM tests work too)
+    const allControls = Array.from(document.querySelectorAll(
+      'input:not([type="hidden"]):not([type="submit"]):not([type="button"])' +
+      ':not([type="reset"]):not([type="image"]), select, textarea'
+    )).filter(function (el) { return !!(el.name || el.id); });
+
+    if (!allControls.length) {
+      return { success: false, message: 'No fillable fields detected on page.' };
+    }
+
+    const fieldsForAI = allControls.map(function (el) {
+      return {
+        name:        el.name || el.id || '',
+        type:        el.type || el.tagName.toLowerCase(),
+        label:       getBestLabel(el),
+        ariaLabel:   (el.getAttribute && el.getAttribute('aria-label')) || '',
+        placeholder: el.placeholder || ''
+      };
+    });
+
+    // AI classification (may return a cached result)
+    const aiResult = await window.SFAIDetector.detectFormFields({
+      fields: fieldsForAI,
+      url:    location.href
+    });
+
+    // Look for a previously-captured form-specific profile for this URL + form
+    const urlPattern         = window.SFFormRegistry.computeURLPattern(location.href);
+    const formSpecificProfile = await window.SFFormRegistry.findFormSpecificProfile(
+      urlPattern, aiResult.formSignature
+    );
+    const activeProfile = formSpecificProfile || loadedProfile;
+
+    // Pre-resolve standard values (policy + transient only-filter already applied)
+    const standardValues = F.resolveValues(activeProfile, (opts && opts.only) || null);
+
+    // Resolve value for each AI-detected field
+    const valuesToFill = {};
+    for (let i = 0; i < aiResult.fields.length; i++) {
+      const aiField = aiResult.fields[i];
+      const value   = await resolveFieldValue(aiField, activeProfile, opts, standardValues);
+      const key     = aiField.htmlName || aiField.name || '';
+      if (key && value !== undefined) valuesToFill[key] = value;
+    }
+
+    const filledCount = await fillFormWithValues(valuesToFill);
+    return {
+      success:     true,
+      filledCount,
+      profileUsed: activeProfile.label || activeProfile.id,
+      message:     'Filled ' + filledCount + ' fields using ' + (activeProfile.label || activeProfile.id)
+    };
+  }
+
+  /**
+   * Capture the current form as a form-specific profile.
+   *
+   * Safe fields are pinned to their current DOM values.
+   * High-risk fields (isSafe: false) are captured but marked 'excluded'.
+   * The profile is upserted into chrome.storage.local.
+   *
+   * options (all bypass real I/O — used in tests):
+   *   mockDetectedFields  — pre-built { fields, formSignature }
+   *   mockReadFormValues  — pre-built { name: value } map
+   *   mockActiveProfile   — profile to inherit country/policy/pins from
+   *   pageTitle           — override document.title
+   *
+   * @returns {Promise<object>} The saved form-specific profile
+   */
+  async function sfCaptureFormAsProfile(options) {
+    options = options || {};
+
+    // 1. AI-detected fields
+    let detectedResult;
+    if (options.mockDetectedFields) {
+      detectedResult = options.mockDetectedFields;
+    } else if (window.SFAIDetector) {
+      scanForms();
+      const scannedForAI = detectedFields.map(function (f) {
+        return {
+          name:        f.name,
+          type:        f.type,
+          label:       f.label,
+          ariaLabel:   (f.element && f.element.getAttribute) ? (f.element.getAttribute('aria-label') || '') : '',
+          placeholder: f.placeholder || ''
+        };
+      });
+      detectedResult = await window.SFAIDetector.detectFormFields({ fields: scannedForAI, url: location.href });
+    } else {
+      return null; // AI detector required for capture
+    }
+
+    const aiFields      = detectedResult.fields       || [];
+    const formSignature = detectedResult.formSignature || 'unknown';
+
+    // 2. Current form values (for pinning)
+    const formValues = (options.mockReadFormValues !== undefined)
+      ? options.mockReadFormValues
+      : readFormValuesFromPage();
+
+    // 3. Inherit country / policy / pins from active profile
+    const activeProfile = (options.mockActiveProfile !== undefined)
+      ? options.mockActiveProfile
+      : await getActiveProfile();
+
+    // 4. URL pattern
+    const urlPattern = (window.SFFormRegistry && window.SFFormRegistry.computeURLPattern)
+      ? window.SFFormRegistry.computeURLPattern(location.href)
+      : _localURLPattern(location.href);
+
+    // 5. Build the fields array
+    const capturedFields = aiFields.map(function (f) {
+      const key = f.htmlName || f.name || '';
+      if (!f.isSafe) {
+        return { htmlName: key, detectedType: f.detectedType || '', mode: 'excluded' };
+      }
+      const currentValue = (formValues && formValues[key] !== undefined) ? formValues[key] : '';
+      return { htmlName: key, detectedType: f.detectedType || '', mode: 'pinned', value: currentValue };
+    });
+
+    // 6. Compose the form-specific profile
+    const pageTitle   = options.pageTitle || (typeof document !== 'undefined' && document.title) || 'Form';
+    const profileId   = 'form-' + formSignature;
+    const formProfile = {
+      id:    profileId,
+      label: pageTitle + ' (captured)',
+      country: (activeProfile && activeProfile.country) || 'AU',
+      policy:  (activeProfile && activeProfile.policy)  || { groups: { name: true, contact: true, address: true, account: true, misc: true }, exclude: [] },
+      pins:    (activeProfile && activeProfile.pins)    || {},
+      fields:  capturedFields,
+      formMetadata: {
+        urlPattern:    urlPattern,
+        formSignature: formSignature,
+        capturedAt:    Date.now()
+      }
+    };
+
+    // 7. Upsert into chrome.storage.local
+    try {
+      const stored   = await chrome.storage.local.get('profiles');
+      const profiles = Array.isArray(stored.profiles) ? stored.profiles.slice() : [];
+      const idx      = profiles.findIndex(function (p) { return p.id === profileId; });
+      if (idx >= 0) profiles[idx] = formProfile; else profiles.push(formProfile);
+      await chrome.storage.local.set({ profiles: profiles });
+    } catch (_) { /* storage unavailable */ }
+
+    // 8. User confirmation
+    try { alert('Form captured: ' + formProfile.label); } catch (_) {}
+
+    return formProfile;
+  }
+
+  window.__sfFillWithProfile      = fillWithProfile;        // exposed for tests
+  window.__sfCaptureFormAsProfile = sfCaptureFormAsProfile; // exposed for tests + popup
 
   // ============================================================
   // Per-form scan icons — let the user target a specific form/modal
@@ -1213,38 +1493,6 @@
     return newProfile;
   };
 
-  /**
-   * Resolve a single field's value against a profile.
-   * Priority:
-   *  1. Form-specific field config (pinned / generated / excluded / empty)
-   *  2. Standard canonical field via SFFormData.resolveValues + policy gate
-   *  3. AI-generated custom field value
-   */
-  async function resolveFieldValue(field, profile, opts) {
-    opts = opts || {};
-
-    // 1. Form-specific field config
-    if (profile.fields) {
-      const fieldConfig = profile.fields.find(f => f.htmlName === field.htmlName);
-      if (fieldConfig) {
-        if (fieldConfig.mode === 'pinned') return fieldConfig.value;
-        if (fieldConfig.mode === 'generated') return await window.SFAIDetector.generateCustomFieldValue(field);
-        if (fieldConfig.mode === 'empty' || fieldConfig.mode === 'excluded') return undefined;
-      }
-    }
-
-    // 2. Standard canonical field via policy gate
-    if (isStandardCanonicalField(field.detectedType)) {
-      if (shouldFillField(field.detectedType, profile.policy, opts.only)) {
-        const allValues = window.SFFormData.resolveValues(profile, opts.only || null);
-        return allValues[field.detectedType];
-      }
-      return undefined;
-    }
-
-    // 3. Custom / unknown field: AI generation
-    return await window.SFAIDetector.generateCustomFieldValue(field);
-  }
   window.__sfResolveFieldValue = resolveFieldValue;
 
   /**
@@ -1276,22 +1524,4 @@
     return true;
   }
 
-  /**
-   * Write a { fieldName: value } map to matching DOM form controls.
-   * Dispatches change events so React/Vue/Angular pick up the mutations.
-   */
-  function fillFormWithValues(valuesToFill) {
-    for (const [fieldName, value] of Object.entries(valuesToFill)) {
-      const elements = document.querySelectorAll('[name="' + fieldName + '"], [id="' + fieldName + '"]');
-      elements.forEach(el => {
-        if (el.type === 'checkbox' || el.type === 'radio') {
-          el.checked = value === el.value;
-        } else {
-          el.value = value;
-        }
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-      });
-    }
-  }
 })();
