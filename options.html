@@ -450,6 +450,30 @@
     <button id="btnSaveBehavior" class="btn">Save Behavior Settings</button>
   </div>
 
+  <!-- Test Profiles -->
+  <div class="card">
+    <div class="section-header">📋 Test Profiles</div>
+
+    <div style="margin-bottom: 24px;">
+      <button id="newProfileBtn" class="btn">+ New profile</button>
+    </div>
+
+    <div style="margin-bottom: 24px;">
+      <h3 style="font-size: 15px; margin: 0 0 12px; font-weight: 600;">Profiles</h3>
+      <ul id="profileList" style="list-style: none; padding: 0; margin: 0;">
+      </ul>
+    </div>
+
+    <div style="border-top: 1px solid #e2e8f0; padding-top: 16px;">
+      <h3 style="font-size: 15px; margin: 0 0 16px; font-weight: 600;">Editor</h3>
+      <div id="profileEditor" style="display: none;">
+      </div>
+      <div id="noProfileSelected" style="color: #64748b; text-align: center; padding: 20px;">
+        Select a profile to edit
+      </div>
+    </div>
+  </div>
+
   <p style="text-align:center; color:#64748b; font-size:12px; margin-top: 32px;">
     SmartForm Filler v0.9.1 • Supports both local Ollama and OpenRouter
   </p>
@@ -492,6 +516,9 @@
   </dialog>
 
   <script src="recommendations.js"></script>
+  <script src="vendor/address-schemas.js"></script>
+  <script src="formdata.js"></script>
+  <script src="profile-ui.js"></script>
   <script src="options.js"></script>
 </body>
 </html>
