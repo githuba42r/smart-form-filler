@@ -90,6 +90,44 @@
     return out;
   }
 
+  const MENU_ONLY = { name:['name','contact'], address:['address'],
+    nameAddress:['name','contact','address'], all:null };
+
+  function shouldFill(key, policy, only) {
+    const g = groupForField(key);
+    if (!g) return false;
+    if (!policy || !policy.groups || !policy.groups[g]) return false;
+    if (policy.exclude && policy.exclude.indexOf(key) !== -1) return false;
+    if (only && only.indexOf(g) === -1) return false;
+    return true;
+  }
+
+  function applyPolicy(engineValues, policy, only) {
+    const out = {};
+    Object.keys(engineValues || {}).forEach(cat => {
+      const canonical = ENGINE_TO_CANONICAL[cat];
+      if (canonical && shouldFill(canonical, policy, only)) out[cat] = engineValues[cat];
+    });
+    return out;
+  }
+
+  function resolveValues(profile, only, opts) {
+    return applyPolicy(toEngineValues(generatePerson(profile, opts)), profile && profile.policy, only || null);
+  }
+
+  const PROFILES_VERSION = 1;
+  const _allGroups = { name:true, contact:true, address:true, account:true, misc:true };
+  const DEFAULT_PROFILES = [
+    { id:'au-personal', label:'AU Personal', country:'AU', randomize:true,
+      policy:{ groups:Object.assign({}, _allGroups, { misc:false }), exclude:[] }, pins:{} },
+    { id:'au-business', label:'AU Business / Company', country:'AU', randomize:true,
+      policy:{ groups:Object.assign({}, _allGroups), exclude:[] }, pins:{ business:'Aether Dynamics Pty Ltd' } },
+    { id:'us-test', label:'US Test User', country:'US', randomize:true,
+      policy:{ groups:Object.assign({}, _allGroups, { misc:false }), exclude:[] }, pins:{} },
+    { id:'minimal', label:'Minimal / Edge Case', country:'AU', randomize:true,
+      policy:{ groups:{ name:true, contact:false, address:false, account:false, misc:false }, exclude:[] }, pins:{} }
+  ];
+
   function generatePerson(profile, opts) {
     opts = opts || {};
     const seed = (opts.seed != null) ? opts.seed : Math.floor(Math.random() * 1e9);
@@ -118,5 +156,5 @@
     return applyPins(person, profile && profile.pins);
   }
 
-  root.SFFormData = { FIELD_GROUPS, CANONICAL_TO_ENGINE, ENGINE_TO_CANONICAL, groupForField, toEngineValues, LOCALES, generatePerson, applyPins };
+  root.SFFormData = { FIELD_GROUPS, CANONICAL_TO_ENGINE, ENGINE_TO_CANONICAL, groupForField, toEngineValues, LOCALES, generatePerson, applyPins, MENU_ONLY, shouldFill, applyPolicy, resolveValues, PROFILES_VERSION, DEFAULT_PROFILES };
 })(typeof window !== 'undefined' ? window : globalThis);
