@@ -1013,3 +1013,147 @@ document.addEventListener('DOMContentLoaded', async () => {
     renderEditor: renderEditor
   };
 });
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Form-specific profile editor — window.* exports (test-friendly)
+//
+// This IIFE runs at script-evaluation time (outside DOMContentLoaded) so
+// unit tests running under jsdom can call these functions without the DOM
+// lifecycle ever firing.  In production:
+//   • window.renderFormSpecificProfileEditor stays as defined here (the DOM
+//     handler calls the local renderFormSpecificProfileEditor instead).
+//   • window.updateFieldMode is overridden by the DOMContentLoaded handler
+//     with a version that closes over the live `profiles` array.
+// ──────────────────────────────────────────────────────────────────────────────
+;(function () {
+  'use strict';
+
+  /**
+   * renderFormSpecificProfileEditor(profile, opts)
+   *
+   * opts.mockRender = true  → return an HTML string (for unit tests, no DOM access)
+   * otherwise               → inject into #formSpecificProfileSection
+   *
+   * Exposed as window.renderFormSpecificProfileEditor so tests can reach it
+   * without waiting for DOMContentLoaded.
+   */
+  window.renderFormSpecificProfileEditor = function (profile, opts) {
+    opts = opts || {};
+    if (!profile) return opts.mockRender ? '' : null;
+
+    var fields = profile.fields || [];
+
+    var rowsHtml = fields.map(function (field) {
+      var modes = ['pinned', 'generated', 'empty', 'excluded'];
+      var modeOptions = modes.map(function (m) {
+        return '<option value="' + m + '"' + (field.mode === m ? ' selected' : '') + '>' + m + '</option>';
+      }).join('');
+
+      var actionHtml;
+      var fId   = (profile.id      || '').replace(/'/g, "\\'");
+      var fName = (field.htmlName  || '').replace(/'/g, "\\'");
+      if (field.mode === 'pinned') {
+        var safeVal = (field.value || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+        actionHtml = '<input type="text" value="' + safeVal + '" ' +
+          'onchange="window.updateFieldValue(\'' + fId + '\',\'' + fName + '\',this.value)" ' +
+          'style="padding:4px 8px;border:1px solid #cbd5e1;border-radius:4px;width:150px;" />';
+      } else if (field.mode === 'generated') {
+        var dt = (field.detectedType || field.htmlName || '').replace(/'/g, "\\'");
+        actionHtml = '<button onclick="window.previewGeneratedValue(\'' + dt + '\')">Preview</button>';
+      } else {
+        actionHtml = '—';
+      }
+
+      return '<tr style="border-bottom:1px solid #eee;">' +
+        '<td style="padding:8px;">' + (field.htmlName || '') + '</td>' +
+        '<td style="padding:8px;">' + (field.htmlType  || '') + '</td>' +
+        '<td style="padding:8px;">' +
+          '<select onchange="window.updateFieldMode(\'' + fId + '\',\'' + fName + '\',this.value)" style="padding:4px;">' +
+            modeOptions +
+          '</select>' +
+        '</td>' +
+        '<td style="padding:8px;">' + actionHtml + '</td>' +
+        '</tr>';
+    }).join('');
+
+    var metaHtml = '';
+    if (profile.formMetadata) {
+      var urlPat = profile.formMetadata.urlPattern || profile.formMetadata.url || '';
+      var cap    = profile.formMetadata.capturedAt;
+      metaHtml =
+        '<p style="font-size:13px;margin:0 0 12px;">' +
+          '<strong>Form URL:</strong> <code>' + urlPat + '</code>' +
+          (cap ? '<br/><strong>Captured:</strong> ' + new Date(cap).toLocaleString() : '') +
+        '</p>';
+    }
+
+    var html =
+      '<h3 style="font-size:15px;font-weight:600;margin:0 0 12px;">Form-Specific Profile: ' +
+        (profile.label || '') + '</h3>' +
+      metaHtml +
+      '<h4 style="font-size:13px;font-weight:600;margin:0 0 8px;">Fields</h4>' +
+      '<table id="formFieldsTable" style="width:100%;border-collapse:collapse;">' +
+        '<thead><tr style="border-bottom:1px solid #ccc;">' +
+          '<th style="padding:8px;text-align:left;">Field Name</th>' +
+          '<th style="padding:8px;text-align:left;">HTML Type</th>' +
+          '<th style="padding:8px;text-align:left;">Mode</th>' +
+          '<th style="padding:8px;text-align:left;">Value / Action</th>' +
+        '</tr></thead>' +
+        '<tbody>' + rowsHtml + '</tbody>' +
+      '</table>' +
+      '<div style="margin-top:15px;">' +
+        '<button onclick="window.deleteFormProfile()" ' +
+          'style="background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;padding:6px 12px;border-radius:6px;cursor:pointer;margin-right:8px;">' +
+          'Delete Profile</button>' +
+        '<button onclick="window.saveFormProfile()" ' +
+          'style="background:#2563eb;color:white;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;">' +
+          'Save</button>' +
+      '</div>';
+
+    if (opts.mockRender) return html;
+
+    // DOM mode — inject into the placeholder div
+    var sec = (typeof document !== 'undefined') && document.getElementById('formSpecificProfileSection');
+    if (sec) {
+      sec.innerHTML = html;
+      sec.style.display = 'block';
+    }
+    return null;
+  };
+
+  /**
+   * updateFieldMode(profileOrId, htmlNameOrIndex, newMode)
+   *
+   * Pure form (used by unit tests):
+   *   profileOrId      = profile object
+   *   htmlNameOrIndex  = htmlName string
+   *   → returns a new profile with the named field's mode updated (non-mutating);
+   *     clears `value` when newMode !== 'pinned'.
+   *
+   * DOM form (set by the DOMContentLoaded handler in production):
+   *   profileOrId      = profileId string
+   *   htmlNameOrIndex  = field index number
+   *   → updates in-memory `profiles` and refreshes the value cell in the table.
+   *
+   * The DOMContentLoaded handler overwrites this assignment in production.  The
+   * version below is the fallback used in tests (where DOMContentLoaded never fires).
+   */
+  window.updateFieldMode = function (profileOrId, htmlNameOrIndex, newMode) {
+    // Pure mode: first argument is a profile object
+    if (typeof profileOrId === 'object' && profileOrId !== null) {
+      var profile  = profileOrId;
+      var htmlName = htmlNameOrIndex;
+      return Object.assign({}, profile, {
+        fields: (profile.fields || []).map(function (f) {
+          if (f.htmlName !== htmlName) return f;
+          var updated = Object.assign({}, f, { mode: newMode });
+          if (newMode !== 'pinned') delete updated.value;
+          return updated;
+        })
+      });
+    }
+    // DOM stub — overridden in production by DOMContentLoaded handler
+    return null;
+  };
+
+})();
