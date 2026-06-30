@@ -156,6 +156,44 @@
     return applyPins(person, profile && profile.pins);
   }
 
+  // Custom field value generators for domain-specific / unknown field types.
+  function _randDigits(n) {
+    var s = ''; for (var i = 0; i < n; i++) s += String(Math.floor(Math.random() * 10)); return s;
+  }
+  function _randUpper(n) {
+    var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', s = '';
+    for (var i = 0; i < n; i++) s += chars[Math.floor(Math.random() * chars.length)]; return s;
+  }
+  function _randAlphaNum(n) {
+    var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', s = '';
+    for (var i = 0; i < n; i++) s += chars[Math.floor(Math.random() * chars.length)]; return s;
+  }
+  function _dateSuffix() {
+    var d = new Date(); var y = String(d.getFullYear()); var m = String(d.getMonth() + 1).padStart(2, '0');
+    var day = String(d.getDate()).padStart(2, '0'); return y + m + day;
+  }
+  function _shortDate() {
+    var d = new Date(); var y = String(d.getFullYear()).slice(2);
+    var m = String(d.getMonth() + 1).padStart(2, '0'); var day = String(d.getDate()).padStart(2, '0');
+    return y + m + day;
+  }
+
+  var CUSTOM_GENERATORS = {
+    sku:         function () { return _randUpper(3) + '-' + _randDigits(5); },
+    customer_id: function () { return 'CUST-' + _randDigits(6); },
+    invoice_id:  function () { return 'INV-' + _dateSuffix(); },
+    product_id:  function () { return 'PROD-' + _randDigits(7); },
+    order_id:    function () { return 'ORD-' + _dateSuffix(); },
+    reference:   function () { return 'REF-' + _randAlphaNum(6); },
+    code:        function () { return _randUpper(8); },
+    serial:      function () { return 'SN-' + _shortDate() + '-' + _randDigits(5); }
+  };
+
+  function generateCustomFieldValue(detectedType) {
+    if (detectedType in CUSTOM_GENERATORS) return CUSTOM_GENERATORS[detectedType]();
+    return 'text_' + detectedType + '_' + Math.random();
+  }
+
   // Profile CRUD data-ops
   function _uniqueId(profiles, base) {
     base = base || 'profile'; let id = base, n = 1;
@@ -179,5 +217,5 @@
   function profilesDelete(profiles, id) { return profiles.length <= 1 ? profiles : profiles.filter(p => p.id !== id); }
   function profilePatch(profiles, id, patch) { return profiles.map(p => p.id === id ? Object.assign({}, p, patch) : p); }
 
-  root.SFFormData = { FIELD_GROUPS, CANONICAL_TO_ENGINE, ENGINE_TO_CANONICAL, groupForField, toEngineValues, LOCALES, generatePerson, applyPins, MENU_ONLY, shouldFill, applyPolicy, resolveValues, PROFILES_VERSION, DEFAULT_PROFILES, profilesCreate, profilesClone, profilesRename, profilesDelete, profilePatch };
+  root.SFFormData = { FIELD_GROUPS, CANONICAL_TO_ENGINE, ENGINE_TO_CANONICAL, groupForField, toEngineValues, LOCALES, generatePerson, applyPins, MENU_ONLY, shouldFill, applyPolicy, resolveValues, PROFILES_VERSION, DEFAULT_PROFILES, profilesCreate, profilesClone, profilesRename, profilesDelete, profilePatch, CUSTOM_GENERATORS, generateCustomFieldValue };
 })(typeof window !== 'undefined' ? window : globalThis);
