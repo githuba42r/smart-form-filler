@@ -76,6 +76,20 @@
   function _digits(rng, template) { return template.replace(/#/g, () => String(Math.floor(rng() * 10))); }
   function _slug(s) { return (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ''); }
 
+  function applyPins(values, pins) {
+    const out = Object.assign({}, values);
+    if (!pins) return out;
+    Object.keys(pins).forEach(key => {
+      const v = pins[key]; if (v == null || v === '') return;
+      if (key === 'emailDomain') {
+        if (out.email && out.email.indexOf('@') !== -1) out.email = out.email.replace(/@.*$/, '@' + v);
+        return;
+      }
+      if (Object.prototype.hasOwnProperty.call(CANONICAL_TO_ENGINE, key)) out[key] = v;
+    });
+    return out;
+  }
+
   function generatePerson(profile, opts) {
     opts = opts || {};
     const seed = (opts.seed != null) ? opts.seed : Math.floor(Math.random() * 1e9);
@@ -101,8 +115,8 @@
       business: `${lastname} ${_pick(rng, ['Holdings','Labs','Group','Trading'])} Pty Ltd`,
       genericText: 'Automated test input generated for development and QA validation.'
     };
-    return person; // pins applied in Task 5
+    return applyPins(person, profile && profile.pins);
   }
 
-  root.SFFormData = { FIELD_GROUPS, CANONICAL_TO_ENGINE, ENGINE_TO_CANONICAL, groupForField, toEngineValues, LOCALES, generatePerson };
+  root.SFFormData = { FIELD_GROUPS, CANONICAL_TO_ENGINE, ENGINE_TO_CANONICAL, groupForField, toEngineValues, LOCALES, generatePerson, applyPins };
 })(typeof window !== 'undefined' ? window : globalThis);
