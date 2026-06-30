@@ -1,0 +1,20 @@
+const { loadGlobals, eq, ok, done } = require('./harness');
+const F = loadGlobals(['vendor/address-schemas.js', 'formdata.js']).SFFormData;
+let profiles = JSON.parse(JSON.stringify(F.DEFAULT_PROFILES));
+
+let r = F.profilesCreate(profiles, 'My Profile'); profiles = r.profiles;
+eq(profiles.length, 5, 'create appends');
+eq(profiles.find(p => p.id === r.id).country, 'AU', 'new profile AU default');
+r = F.profilesClone(profiles, 'us-test'); profiles = r.profiles;
+eq(profiles.length, 6, 'clone appends');
+ok(profiles.find(p => p.id === r.id).label.indexOf('copy') !== -1, 'clone label tagged');
+ok(profiles.find(p => p.id === r.id).country === 'US', 'clone copies country');
+profiles = F.profilesRename(profiles, r.id, 'Renamed');
+eq(profiles.find(p => p.id === r.id).label, 'Renamed', 'renamed');
+profiles = F.profilePatch(profiles, 'au-personal', { country: 'US', pins: { emailDomain: 'x.test' } });
+const ap = profiles.find(p => p.id === 'au-personal');
+eq(ap.country, 'US', 'patched country'); eq(ap.pins.emailDomain, 'x.test', 'patched pins');
+profiles = F.profilesDelete(profiles, r.id);
+ok(!profiles.find(p => p.id === r.id), 'deleted');
+eq(F.profilesDelete([profiles[0]], profiles[0].id).length, 1, 'refuses to delete last');
+done('formdata-crud');

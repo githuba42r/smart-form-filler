@@ -74,7 +74,7 @@
   }
   function _pick(rng, arr) { return arr[Math.floor(rng() * arr.length)]; }
   function _digits(rng, template) { return template.replace(/#/g, () => String(Math.floor(rng() * 10))); }
-  function _slug(s) { return (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ''); }
+  function _slug(s) { return (s || 'profile').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''); }
 
   function applyPins(values, pins) {
     const out = Object.assign({}, values);
@@ -156,5 +156,28 @@
     return applyPins(person, profile && profile.pins);
   }
 
-  root.SFFormData = { FIELD_GROUPS, CANONICAL_TO_ENGINE, ENGINE_TO_CANONICAL, groupForField, toEngineValues, LOCALES, generatePerson, applyPins, MENU_ONLY, shouldFill, applyPolicy, resolveValues, PROFILES_VERSION, DEFAULT_PROFILES };
+  // Profile CRUD data-ops
+  function _uniqueId(profiles, base) {
+    base = base || 'profile'; let id = base, n = 1;
+    const taken = {}; profiles.forEach(p => { taken[p.id] = true; });
+    while (taken[id]) { id = `${base}-${n++}`; }
+    return id;
+  }
+  function _blankPolicy() { return { groups: { name: true, contact: true, address: true, account: true, misc: true }, exclude: [] }; }
+  function profilesCreate(profiles, label) {
+    const next = profiles.slice(); const id = _uniqueId(next, _slug(label));
+    next.push({ id, label: label || 'New Profile', country: 'AU', randomize: true, policy: _blankPolicy(), pins: {} });
+    return { profiles: next, id };
+  }
+  function profilesClone(profiles, id) {
+    const src = profiles.find(p => p.id === id); if (!src) return { profiles, id: null };
+    const next = profiles.slice(); const newId = _uniqueId(next, _slug(src.label) + '-copy');
+    next.push(Object.assign(JSON.parse(JSON.stringify(src)), { id: newId, label: src.label + ' (copy)' }));
+    return { profiles: next, id: newId };
+  }
+  function profilesRename(profiles, id, label) { return profiles.map(p => p.id === id ? Object.assign({}, p, { label }) : p); }
+  function profilesDelete(profiles, id) { return profiles.length <= 1 ? profiles : profiles.filter(p => p.id !== id); }
+  function profilePatch(profiles, id, patch) { return profiles.map(p => p.id === id ? Object.assign({}, p, patch) : p); }
+
+  root.SFFormData = { FIELD_GROUPS, CANONICAL_TO_ENGINE, ENGINE_TO_CANONICAL, groupForField, toEngineValues, LOCALES, generatePerson, applyPins, MENU_ONLY, shouldFill, applyPolicy, resolveValues, PROFILES_VERSION, DEFAULT_PROFILES, profilesCreate, profilesClone, profilesRename, profilesDelete, profilePatch };
 })(typeof window !== 'undefined' ? window : globalThis);
