@@ -22,86 +22,6 @@
     try { if (localStorage.getItem('smartFormDebug') === '1') console.log('[SmartForm]', ...args); } catch (_) {}
   }
 
-  // Built-in test data profiles (AU-focused for Brisbane/Mansfield dev context)
-  const BUILTIN_PROFILES = {
-    'au-personal': {
-      name: 'AU Personal (Mansfield/Brisbane)',
-      firstName: 'Jordan',
-      lastName: 'Ellis',
-      fullName: 'Jordan Ellis',
-      email: 'jordan.ellis.dev@example.com.au',
-      phone: '0412 987 654',
-      address1: '17 Riverside Drive',
-      address2: 'Apt 12',
-      city: 'Mansfield',
-      state: 'QLD',
-      postcode: '4122',
-      country: 'Australia',
-      company: '',
-      username: 'jordan_dev_qld',
-      password: 'DevTest2026!',
-      dob: '1988-03-22',
-      genericText: 'This is automated test input generated for development and QA validation purposes.'
-    },
-    'au-business': {
-      name: 'AU Business / Company',
-      firstName: 'Taylor',
-      lastName: 'Morgan',
-      fullName: 'Taylor Morgan',
-      email: 'taylor.morgan@techtest.com.au',
-      phone: '07 3123 4567',
-      address1: 'Level 8, 200 Queen Street',
-      address2: '',
-      city: 'Brisbane',
-      state: 'QLD',
-      postcode: '4000',
-      country: 'Australia',
-      company: 'Aether Dynamics Pty Ltd',
-      username: 'tmorgan_aether',
-      password: 'BizTestPass!42',
-      dob: '1992-11-05',
-      genericText: 'Business account creation test data - for internal development environment only.'
-    },
-    'us-test': {
-      name: 'US Test User',
-      firstName: 'Casey',
-      lastName: 'Rivera',
-      fullName: 'Casey Rivera',
-      email: 'casey.rivera.test@gmail.com',
-      phone: '(415) 555-0192',
-      address1: '2450 Market Street',
-      address2: 'Suite 300',
-      city: 'San Francisco',
-      state: 'CA',
-      postcode: '94114',
-      country: 'United States',
-      company: 'Pacific Labs Inc',
-      username: 'casey_rivera_sf',
-      password: 'UsaTest2026#',
-      dob: '1995-07-18',
-      genericText: 'US-based test profile for international form validation.'
-    },
-    'minimal': {
-      name: 'Minimal / Edge Case',
-      firstName: 'A',
-      lastName: 'B',
-      fullName: 'A B',
-      email: 'a@b.co',
-      phone: '0400000000',
-      address1: '1 Test St',
-      address2: '',
-      city: 'Testville',
-      state: 'TS',
-      postcode: '0000',
-      country: 'Australia',
-      company: '',
-      username: 'test',
-      password: 'test',
-      dob: '2000-01-01',
-      genericText: 'x'
-    }
-  };
-
   /**
    * Find the best human-readable label for a form control.
    */
@@ -267,6 +187,24 @@
     const base = (field.label || field.placeholder || field.name || 'test').toLowerCase().replace(/\s+/g, '-');
     return base.length > 3 ? base.substring(0, 20) : 'test-value-' + Date.now().toString().slice(-4);
   }
+
+  /**
+   * Load a profile from storage, with fallback to built-in DEFAULT_PROFILES.
+   * Returns the profile matching profileKey (or defaultProfile, or first profile).
+   * Exposed as window.__sfLoadProfile for testing.
+   */
+  async function loadProfile(profileKey) {
+    const F = window.SFFormData;
+    let profiles = [], defaultProfile = null;
+    try {
+      const s = await chrome.storage.local.get(['profiles', 'defaultProfile']);
+      profiles = s.profiles || []; defaultProfile = s.defaultProfile || null;
+    } catch (e) { /* storage unavailable */ }
+    if (!profiles.length) profiles = F.DEFAULT_PROFILES;
+    const wantId = profileKey || defaultProfile || profiles[0].id;
+    return profiles.find(p => p.id === wantId) || profiles[0];
+  }
+  window.__sfLoadProfile = loadProfile; // exported for tests
 
   // Fillable form controls (exclude non-data inputs).
   const FILLABLE_SELECTOR =
@@ -447,29 +385,6 @@
     name: ['firstName', 'lastName', 'fullName', 'username', 'email', 'phone', 'dob', 'password', 'company'],
     address: ['address1', 'address2', 'city', 'state', 'postcode', 'country']
   };
-
-  // Make identity fields unique so repeated fills create distinct test customers.
-  let fillCounter = Math.floor((Date.now() / 1000) % 1000);
-  function uniquifyProfile(profile) {
-    fillCounter = (fillCounter + 1) % 100000;
-    const n = fillCounter;
-    const p = { ...profile };
-    if (p.email && p.email.includes('@')) {
-      const [local, domain] = p.email.split('@');
-      p.email = `${local.split('+')[0]}.${n}@${domain}`;
-    }
-    if (p.username) p.username = `${p.username}${n}`;
-    if (p.lastName) p.lastName = `${p.lastName}${n}`;
-    p.fullName = `${p.firstName || ''} ${p.lastName || ''}`.trim() || p.fullName;
-    if (p.phone) {
-      const tail = String(1000 + (n % 9000)); // 4 unique digits
-      let i = 0;
-      p.phone = p.phone.split('').reverse()
-        .map(ch => (/\d/.test(ch) && i < 4) ? tail[3 - i++] : ch)
-        .reverse().join('');
-    }
-    return p;
-  }
 
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -695,9 +610,9 @@
     dbg('fill: detected fields →', detectedFields.map(f =>
       `${f.label || f.name || f.type}[${getFieldCategory(f) || '?'}${isAutocompleteInput(f.element) ? ',auto' : ''}]`).join('  '));
 
-    let profile = BUILTIN_PROFILES[profileKey] || BUILTIN_PROFILES['au-personal'];
-    if (opts.unique) profile = uniquifyProfile(profile);
-    const allow = opts.categories ? new Set(opts.categories) : null;
+    const F = window.SFFormData;
+    const profile = await loadProfile(profileKey);
+    const values = F.resolveValues(profile, (opts && opts.only) || null);
 
     const handled = new Set();
     const intended = new Map(); // el -> value we set (to restore after blur-geocode)
@@ -723,7 +638,8 @@
           const isSelect = el.tagName.toLowerCase() === 'select';
           const category = getFieldCategory(field);
 
-          if (allow && !(category && allow.has(category))) continue; // group mode
+          // Skip fields gated out by policy/override
+          if (!(category in values)) continue;
 
           // Already done — only revisit a <select> a dependency reset to empty.
           if (handled.has(el) && !(isSelect && isEmptyValue(el))) continue;
@@ -740,7 +656,7 @@
           // Don't overwrite a field the user/form already populated (idempotent re-passes).
           if (handled.has(el) && !isEmptyValue(el)) { continue; }
 
-          const value = valueForField(field, category, profile, allow);
+          const value = values[category];
           if (value === null || value === undefined) continue;
 
           const isAuto = isAutocompleteInput(el);
@@ -799,6 +715,26 @@
       } catch (_) {}
     });
     return { success: true, filledCount: n, message: `Cleared ${n} fields` };
+  }
+
+  // Accessor for the MENU_ONLY mapping (exposes menu key -> field categories).
+  function __sfMenuOnlyFor(key) { return window.SFFormData.MENU_ONLY[key]; }
+  window.__sfMenuOnlyFor = __sfMenuOnlyFor;
+
+  // Convert formdata canonical group names to engine field names for fillWithProfile filtering.
+  function groupsToEngineFields(formDataGroups) {
+    if (!formDataGroups || !Array.isArray(formDataGroups)) return null;
+    const fields = [];
+    const CANONICAL_TO_ENGINE = window.SFFormData.CANONICAL_TO_ENGINE;
+    const FORMDATA_GROUPS = window.SFFormData.FIELD_GROUPS; // formdata's FIELD_GROUPS use canonical names
+    formDataGroups.forEach(groupName => {
+      const canonicalNames = FORMDATA_GROUPS[groupName] || [];
+      canonicalNames.forEach(canonical => {
+        const engineName = CANONICAL_TO_ENGINE[canonical];
+        if (engineName && !fields.includes(engineName)) fields.push(engineName);
+      });
+    });
+    return fields.length > 0 ? fields : null;
   }
 
   /**
@@ -941,7 +877,10 @@
       showToast('No fillable fields found in this form');
       return;
     }
-    showFillMenu(btn, result);
+    showFillMenu(btn, result).catch(err => {
+      console.warn('[SmartForm] Menu display error:', err);
+      showToast('Error displaying menu');
+    });
   }
 
   function closeFillMenu() {
@@ -954,8 +893,15 @@
   }
 
   // Inline menu offering Name / Address / All / Clear, scoped to the clicked form.
-  function showFillMenu(anchorBtn, scanResult) {
+  async function showFillMenu(anchorBtn, scanResult) {
     closeFillMenu();
+    const { profiles = [], defaultProfile = null } =
+      await chrome.storage.local.get(['profiles', 'defaultProfile']);
+    const list = profiles.length ? profiles : window.SFFormData.DEFAULT_PROFILES;
+    const menu = window.SFProfileUI.buildMenu(document, list, defaultProfile);
+    const profileSel = menu.querySelector('select[data-role="profile"]');
+
+    // Wrap the menu contents in a styled container
     fillMenu = document.createElement('div');
     fillMenu.setAttribute(SF_UI_ATTR, '');
     Object.assign(fillMenu.style, {
@@ -969,25 +915,30 @@
     Object.assign(header.style, { fontSize: '11px', color: '#64748b', padding: '4px 8px 6px', fontWeight: '600' });
     fillMenu.appendChild(header);
 
-    const items = [
-      { label: '👤  Fill name & contact', group: 'name' },
-      { label: '🏠  Fill address', group: 'address' },
-      { label: '✨  Fill all fields', group: null },
-      { label: '🧹  Clear fields', clear: true }
-    ];
-    items.forEach(it => {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.textContent = it.label;
-      b.setAttribute(SF_UI_ATTR, '');
-      Object.assign(b.style, {
-        display: 'block', width: '100%', textAlign: 'left', border: 'none', background: 'transparent',
-        padding: '8px 10px', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', color: '#0f172a'
-      });
-      b.addEventListener('mouseenter', () => { b.style.background = '#f1f5f9'; });
-      b.addEventListener('mouseleave', () => { b.style.background = 'transparent'; });
-      b.addEventListener('click', (e) => { e.stopPropagation(); runMenuAction(it); });
-      fillMenu.appendChild(b);
+    // Style and wire menu elements from SFProfileUI.buildMenu
+    Array.from(menu.children).forEach(el => {
+      if (el.tagName === 'BUTTON') {
+        el.setAttribute(SF_UI_ATTR, '');
+        Object.assign(el.style, {
+          display: 'block', width: '100%', textAlign: 'left', border: 'none', background: 'transparent',
+          padding: '8px 10px', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', color: '#0f172a'
+        });
+        el.addEventListener('mouseenter', () => { el.style.background = '#f1f5f9'; });
+        el.addEventListener('mouseleave', () => { el.style.background = 'transparent'; });
+
+        if (el.hasAttribute('data-only')) {
+          el.addEventListener('click', (e) => { e.stopPropagation(); runMenuAction(__sfMenuOnlyFor(el.getAttribute('data-only')), profileSel.value); });
+        } else if (el.hasAttribute('data-action') && el.getAttribute('data-action') === 'clear') {
+          el.addEventListener('click', (e) => { e.stopPropagation(); clearDetected(); closeFillMenu(); showToast('Cleared detected fields'); });
+        }
+      } else if (el.tagName === 'SELECT') {
+        el.setAttribute(SF_UI_ATTR, '');
+        Object.assign(el.style, {
+          display: 'block', width: '100%', padding: '6px 8px', marginTop: '4px', borderRadius: '4px',
+          border: '1px solid #d1d5db', fontSize: '12px', cursor: 'pointer'
+        });
+      }
+      fillMenu.appendChild(el);
     });
 
     document.body.appendChild(fillMenu);
@@ -1005,25 +956,26 @@
     setTimeout(() => document.addEventListener('click', onDocClickForMenu, true), 0);
   }
 
-  async function runMenuAction(it) {
-    let profileKey = 'au-personal';
-    try {
-      const s = await chrome.storage.local.get(['defaultProfile']);
-      if (s.defaultProfile) profileKey = s.defaultProfile;
-    } catch (_) {}
-
-    if (it.clear) {
-      showToast(clearDetected().message);
-    } else {
-      const res = await fillWithProfile(profileKey, {
-        categories: it.group ? FIELD_GROUPS[it.group] : null,
-        unique: true
+  function runMenuAction(only, profileId) {
+    // Convert formdata canonical group names to engine field names for fillWithProfile.
+    const categories = groupsToEngineFields(only);
+    const res = fillWithProfile(profileId, { categories, unique: true });
+    if (res && res.then) {
+      // fillWithProfile is async
+      res.then(result => {
+        showToast(result && result.filledCount
+          ? `Filled ${result.filledCount} field${result.filledCount === 1 ? '' : 's'} with unique test data`
+          : 'No matching fields in this form');
+        closeFillMenu();
+      }).catch(err => {
+        showToast('Error filling fields: ' + (err && err.message || 'Unknown'));
+        closeFillMenu();
       });
-      showToast(res.filledCount
-        ? `Filled ${res.filledCount} field${res.filledCount === 1 ? '' : 's'} with unique test data`
-        : 'No matching fields in this form');
+    } else {
+      // Shouldn't reach here since fillWithProfile is async
+      showToast(res && res.message ? res.message : 'Fields filled');
+      closeFillMenu();
     }
-    closeFillMenu();
   }
 
   function flashButton(btn, count) {
