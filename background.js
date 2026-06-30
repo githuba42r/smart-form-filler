@@ -195,6 +195,103 @@ Return the JSON now:`;
   }
 }
 
+// ---------------------------------------------------------------------------
+// Generic LLM proxy — used by content scripts for AI field detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Dispatch a plain-text prompt to the configured LLM provider.
+ * Reads provider settings from chrome.storage.sync.
+ * @returns {Promise<string>} The model's text response.
+ */
+async function callLLM(prompt, timeoutMs = 10000) {
+  const settings = await chrome.storage.sync.get(['llmProvider', 'ollamaUrl', 'openrouterApiKey']);
+  const provider = settings.llmProvider || 'ollama';
+
+  if (provider === 'ollama') {
+    return await callOllama(prompt, settings.ollamaUrl || DEFAULT_OLLAMA_URL, timeoutMs);
+  } else if (provider === 'openrouter') {
+    return await callOpenRouter(prompt, settings.openrouterApiKey, timeoutMs);
+  } else {
+    throw new Error(`Unknown LLM provider: ${provider}`);
+  }
+}
+
+/**
+ * Call Ollama /api/generate with a plain-text prompt.
+ * @returns {Promise<string>}
+ */
+async function callOllama(prompt, url, timeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(`${url}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'mistral:latest',
+        prompt,
+        stream: false,
+        temperature: 0.3
+      }),
+      signal: controller.signal
+    });
+
+    clearTimeout(timeout);
+    if (!response.ok) throw new Error(`Ollama error: ${response.status}`);
+
+    const data = await response.json();
+    return data.response;
+  } catch (err) {
+    clearTimeout(timeout);
+    throw new Error(`Ollama call failed: ${err.message}`);
+  }
+}
+
+/**
+ * Call OpenRouter chat completions API with a plain-text prompt.
+ * @returns {Promise<string>}
+ */
+async function callOpenRouter(prompt, apiKey, timeoutMs) {
+  if (!apiKey) throw new Error('No OpenRouter API key configured.');
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://smartform-filler.dev',
+        'X-Title': 'SmartForm Filler'
+      },
+      body: JSON.stringify({
+        model: 'mistral-7b-instruct',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.3
+      }),
+      signal: controller.signal
+    });
+
+    clearTimeout(timeout);
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`OpenRouter ${response.status}: ${errText}`);
+    }
+
+    const data = await response.json();
+    return data.choices?.[0]?.message?.content || '';
+  } catch (err) {
+    clearTimeout(timeout);
+    throw new Error(`OpenRouter call failed: ${err.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+
 /**
  * Message listener from popup or content scripts.
  */
@@ -250,6 +347,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         });
       });
     return true;
+  }
+
+  // Generic LLM proxy for content scripts (AI field detection)
+  if (msg.action === 'callLLM') {
+    callLLM(msg.prompt, msg.timeoutMs)
+      .then(result => sendResponse({ result }))
+      .catch(err => sendResponse({ error: err.message }));
+    return true; // Keep channel open for async response
   }
 
   // Command from keyboard shortcut
