@@ -691,7 +691,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const urlEl = document.getElementById('formProfileUrl');
     const capturedAtEl = document.getElementById('formProfileCapturedAt');
     if (labelEl) labelEl.textContent = profile.label || profile.id;
-    if (urlEl) urlEl.textContent = (profile.formMetadata && profile.formMetadata.url) || '';
+    if (urlEl) urlEl.textContent = (profile.formMetadata && profile.formMetadata.urlPattern) || '';
     if (capturedAtEl) capturedAtEl.textContent = (profile.formMetadata && profile.formMetadata.capturedAt) || '';
 
     // Render fields table
@@ -1078,7 +1078,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     var metaHtml = '';
     if (profile.formMetadata) {
-      var urlPat = profile.formMetadata.urlPattern || profile.formMetadata.url || '';
+      var urlPat = profile.formMetadata.urlPattern || '';
       var cap    = profile.formMetadata.capturedAt;
       metaHtml =
         '<p style="font-size:13px;margin:0 0 12px;">' +

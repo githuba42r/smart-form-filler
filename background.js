@@ -205,8 +205,8 @@ Return the JSON now:`;
  * @returns {Promise<string>} The model's text response.
  */
 async function callLLM(prompt, timeoutMs = 10000) {
-  const settings = await chrome.storage.sync.get(['llmProvider', 'ollamaUrl', 'openrouterApiKey']);
-  const provider = settings.llmProvider || 'ollama';
+  const settings = await chrome.storage.local.get(['provider', 'ollamaUrl', 'openrouterApiKey']);
+  const provider = settings.provider || 'ollama';
 
   if (provider === 'ollama') {
     return await callOllama(prompt, settings.ollamaUrl || DEFAULT_OLLAMA_URL, timeoutMs);

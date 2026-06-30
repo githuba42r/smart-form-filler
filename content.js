@@ -922,106 +922,6 @@
     };
   }
 
-  /**
-   * Capture the current form as a form-specific profile.
-   *
-   * Safe fields are pinned to their current DOM values.
-   * High-risk fields (isSafe: false) are captured but marked 'excluded'.
-   * The profile is upserted into chrome.storage.local.
-   *
-   * options (all bypass real I/O — used in tests):
-   *   mockDetectedFields  — pre-built { fields, formSignature }
-   *   mockReadFormValues  — pre-built { name: value } map
-   *   mockActiveProfile   — profile to inherit country/policy/pins from
-   *   pageTitle           — override document.title
-   *
-   * @returns {Promise<object>} The saved form-specific profile
-   */
-  async function sfCaptureFormAsProfile(options) {
-    options = options || {};
-
-    // 1. AI-detected fields
-    let detectedResult;
-    if (options.mockDetectedFields) {
-      detectedResult = options.mockDetectedFields;
-    } else if (window.SFAIDetector) {
-      scanForms();
-      const scannedForAI = detectedFields.map(function (f) {
-        return {
-          name:        f.name,
-          type:        f.type,
-          label:       f.label,
-          ariaLabel:   (f.element && f.element.getAttribute) ? (f.element.getAttribute('aria-label') || '') : '',
-          placeholder: f.placeholder || ''
-        };
-      });
-      detectedResult = await window.SFAIDetector.detectFormFields({ fields: scannedForAI, url: location.href });
-    } else {
-      return null; // AI detector required for capture
-    }
-
-    const aiFields      = detectedResult.fields       || [];
-    const formSignature = detectedResult.formSignature || 'unknown';
-
-    // 2. Current form values (for pinning)
-    const formValues = (options.mockReadFormValues !== undefined)
-      ? options.mockReadFormValues
-      : readFormValuesFromPage();
-
-    // 3. Inherit country / policy / pins from active profile
-    const activeProfile = (options.mockActiveProfile !== undefined)
-      ? options.mockActiveProfile
-      : await getActiveProfile();
-
-    // 4. URL pattern
-    const urlPattern = (window.SFFormRegistry && window.SFFormRegistry.computeURLPattern)
-      ? window.SFFormRegistry.computeURLPattern(location.href)
-      : _localURLPattern(location.href);
-
-    // 5. Build the fields array
-    const capturedFields = aiFields.map(function (f) {
-      const key = f.htmlName || f.name || '';
-      if (!f.isSafe) {
-        return { htmlName: key, detectedType: f.detectedType || '', mode: 'excluded' };
-      }
-      const currentValue = (formValues && formValues[key] !== undefined) ? formValues[key] : '';
-      return { htmlName: key, detectedType: f.detectedType || '', mode: 'pinned', value: currentValue };
-    });
-
-    // 6. Compose the form-specific profile
-    const pageTitle   = options.pageTitle || (typeof document !== 'undefined' && document.title) || 'Form';
-    const profileId   = 'form-' + formSignature;
-    const formProfile = {
-      id:    profileId,
-      label: pageTitle + ' (captured)',
-      country: (activeProfile && activeProfile.country) || 'AU',
-      policy:  (activeProfile && activeProfile.policy)  || { groups: { name: true, contact: true, address: true, account: true, misc: true }, exclude: [] },
-      pins:    (activeProfile && activeProfile.pins)    || {},
-      fields:  capturedFields,
-      formMetadata: {
-        urlPattern:    urlPattern,
-        formSignature: formSignature,
-        capturedAt:    Date.now()
-      }
-    };
-
-    // 7. Upsert into chrome.storage.local
-    try {
-      const stored   = await chrome.storage.local.get('profiles');
-      const profiles = Array.isArray(stored.profiles) ? stored.profiles.slice() : [];
-      const idx      = profiles.findIndex(function (p) { return p.id === profileId; });
-      if (idx >= 0) profiles[idx] = formProfile; else profiles.push(formProfile);
-      await chrome.storage.local.set({ profiles: profiles });
-    } catch (_) { /* storage unavailable */ }
-
-    // 8. User confirmation
-    try { alert('Form captured: ' + formProfile.label); } catch (_) {}
-
-    return formProfile;
-  }
-
-  window.__sfFillWithProfile      = fillWithProfile;        // exposed for tests
-  window.__sfCaptureFormAsProfile = sfCaptureFormAsProfile; // exposed for tests + popup
 
   // ============================================================
   // Per-form scan icons — let the user target a specific form/modal
@@ -1523,5 +1423,9 @@
     if (only && group && !only.includes(group)) return false;
     return true;
   }
+
+  // Exports for tests
+  window.__sfFillWithProfile = fillWithProfile;
+  window.__sfResolveFieldValue = resolveFieldValue;
 
 })();
