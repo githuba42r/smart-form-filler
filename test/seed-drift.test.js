@@ -1,0 +1,11 @@
+const path = require('path'), fs = require('fs');
+const { ok, done } = require('./harness');
+const { DEFAULT_PROFILES, PROFILES_VERSION } = require(path.resolve(__dirname, '..', 'seed-data.node.js'));
+const root = path.resolve(__dirname, '..');
+const has = (s, id) => s.indexOf(`id:'${id}'`) !== -1 || s.indexOf(`id: '${id}'`) !== -1;
+const bg = fs.readFileSync(path.join(root, 'background.js'), 'utf8');
+ok(bg.indexOf('PROFILES_VERSION = ' + PROFILES_VERSION) !== -1, 'background version matches');
+DEFAULT_PROFILES.forEach(p => ok(has(bg, p.id), `background seeds ${p.id}`));
+const fd = fs.readFileSync(path.join(root, 'formdata.js'), 'utf8');
+DEFAULT_PROFILES.forEach(p => ok(has(fd, p.id), `formdata seeds ${p.id}`));
+done('seed-drift');

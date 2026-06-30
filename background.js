@@ -267,15 +267,37 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return false;
 });
 
+// Seed & migrate storage-backed profiles on install
+const PROFILES_VERSION = 1;
+const _allGroups = { name:true, contact:true, address:true, account:true, misc:true };
+const DEFAULT_PROFILES = [
+  { id:'au-personal', label:'AU Personal', country:'AU', randomize:true,
+    policy:{ groups:{ ..._allGroups, misc:false }, exclude:[] }, pins:{} },
+  { id:'au-business', label:'AU Business / Company', country:'AU', randomize:true,
+    policy:{ groups:{ ..._allGroups }, exclude:[] }, pins:{ business:'Aether Dynamics Pty Ltd' } },
+  { id:'us-test', label:'US Test User', country:'US', randomize:true,
+    policy:{ groups:{ ..._allGroups, misc:false }, exclude:[] }, pins:{} },
+  { id:'minimal', label:'Minimal / Edge Case', country:'AU', randomize:true,
+    policy:{ groups:{ name:true, contact:false, address:false, account:false, misc:false }, exclude:[] }, pins:{} }
+];
+async function seedProfiles(store) {
+  const cur = await store.get(['profiles', 'profilesVersion', 'defaultProfile']);
+  const needsSeed = !cur.profiles || (cur.profilesVersion || 0) < PROFILES_VERSION;
+  const patch = {};
+  if (needsSeed) { patch.profiles = JSON.parse(JSON.stringify(DEFAULT_PROFILES)); patch.profilesVersion = PROFILES_VERSION; }
+  if (!cur.defaultProfile) patch.defaultProfile = DEFAULT_PROFILES[0].id;
+  if (Object.keys(patch).length) await store.set(patch);
+}
+
 // Optional: on install, set some defaults
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === 'install') {
+    seedProfiles({ get: (k) => chrome.storage.local.get(k), set: (o) => chrome.storage.local.set(o) });
     chrome.storage.local.set({
       ollamaUrl: DEFAULT_OLLAMA_URL,
       ollamaModel: DEFAULT_OLLAMA_MODEL,
       openrouterModel: 'qwen/qwen3-coder', // Qwen3 Coder 480B default
-      aiEnabled: true,
-      defaultProfile: 'au-personal'
+      aiEnabled: true
     });
     console.log('[SmartForm] Extension installed. Default Ollama config set.');
   }
