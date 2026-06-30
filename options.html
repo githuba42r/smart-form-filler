@@ -472,6 +472,34 @@
         Select a profile to edit
       </div>
     </div>
+
+    <!-- Form-specific profile editor (shown when profile has formMetadata) -->
+    <div id="formSpecificProfileSection" style="display: none; margin-top: 20px; padding: 15px; border: 1px solid #ccc; border-radius: 4px;">
+      <h3 style="margin-top: 0;">Form-Specific Profile: <span id="formProfileLabel"></span></h3>
+      <p style="margin-bottom: 16px;">
+        <strong>Form URL:</strong> <code id="formProfileUrl"></code><br/>
+        <strong>Captured:</strong> <span id="formProfileCapturedAt"></span>
+      </p>
+
+      <h4>Fields</h4>
+      <table id="formFieldsTable" style="width: 100%; border-collapse: collapse;">
+        <thead>
+          <tr style="border-bottom: 1px solid #ccc;">
+            <th style="padding: 8px; text-align: left;">Field Name</th>
+            <th style="padding: 8px; text-align: left;">HTML Type</th>
+            <th style="padding: 8px; text-align: left;">Mode</th>
+            <th style="padding: 8px; text-align: left;">Value / Action</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+
+      <div style="margin-top: 15px; display: flex; gap: 8px;">
+        <button id="addFieldBtn" class="btn btn-secondary" onclick="window.addFieldToFormProfile()">Add Field</button>
+        <button id="deleteFormProfileBtn" class="btn btn-secondary" style="color: #991b1b;" onclick="window.deleteFormProfile()">Delete Profile</button>
+        <button id="saveFormProfileBtn" class="btn" onclick="window.saveFormProfile()">Save</button>
+      </div>
+    </div>
   </div>
 
   <p style="text-align:center; color:#64748b; font-size:12px; margin-top: 32px;">

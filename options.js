@@ -644,11 +644,192 @@ document.addEventListener('DOMContentLoaded', async () => {
     currentEditId = null;
   }
 
+  // ── Form-specific profile editor ─────────────────────────────────────────
+
+  // Render the value/action cell for a field row.
+  function _renderValueCell(td, profile, idx, field) {
+    td.innerHTML = '';
+    if (!field) return;
+    if (field.mode === 'pinned') {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = field.value || '';
+      input.style.cssText = 'padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 4px; width: 150px;';
+      input.addEventListener('change', function () {
+        window.updateFieldValue(profile.id, idx, input.value);
+      });
+      td.appendChild(input);
+    } else if (field.mode === 'generated') {
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-secondary';
+      btn.style.fontSize = '12px';
+      btn.textContent = 'Preview';
+      btn.addEventListener('click', function () {
+        const preview = window.previewGeneratedValue(field.detectedType || field.name);
+        btn.textContent = 'Preview: ' + preview;
+      });
+      td.appendChild(btn);
+    } else {
+      td.textContent = '—';
+    }
+  }
+
+  // Render the form-specific profile editor section.
+  function renderFormSpecificProfileEditor(profile) {
+    const formSection = document.getElementById('formSpecificProfileSection');
+    const editor = document.getElementById('profileEditor');
+    const noSelected = document.getElementById('noProfileSelected');
+
+    if (editor) { editor.innerHTML = ''; editor.style.display = 'none'; }
+    if (noSelected) noSelected.style.display = 'none';
+    if (!formSection) return;
+
+    formSection.style.display = 'block';
+
+    // Populate header metadata
+    const labelEl = document.getElementById('formProfileLabel');
+    const urlEl = document.getElementById('formProfileUrl');
+    const capturedAtEl = document.getElementById('formProfileCapturedAt');
+    if (labelEl) labelEl.textContent = profile.label || profile.id;
+    if (urlEl) urlEl.textContent = (profile.formMetadata && profile.formMetadata.url) || '';
+    if (capturedAtEl) capturedAtEl.textContent = (profile.formMetadata && profile.formMetadata.capturedAt) || '';
+
+    // Render fields table
+    const tbody = formSection.querySelector('#formFieldsTable tbody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+
+    const fields = profile.fields || [];
+    fields.forEach(function (field, idx) {
+      const tr = document.createElement('tr');
+      tr.style.borderBottom = '1px solid #eee';
+
+      // Field Name
+      const tdName = document.createElement('td');
+      tdName.style.padding = '8px';
+      tdName.textContent = field.name;
+
+      // HTML Type
+      const tdType = document.createElement('td');
+      tdType.style.padding = '8px';
+      tdType.textContent = field.htmlType || '';
+
+      // Mode dropdown
+      const tdMode = document.createElement('td');
+      tdMode.style.padding = '8px';
+      const modeSelect = document.createElement('select');
+      modeSelect.dataset.fieldIndex = String(idx);
+      ['generated', 'pinned', 'empty', 'excluded'].forEach(function (mode) {
+        const opt = document.createElement('option');
+        opt.value = mode;
+        opt.textContent = mode;
+        if (field.mode === mode) opt.selected = true;
+        modeSelect.appendChild(opt);
+      });
+      modeSelect.addEventListener('change', function () {
+        window.updateFieldMode(profile.id, idx, modeSelect.value);
+      });
+      tdMode.appendChild(modeSelect);
+
+      // Value / Action cell
+      const tdValue = document.createElement('td');
+      tdValue.style.padding = '8px';
+      tdValue.setAttribute('data-value-cell', String(idx));
+      _renderValueCell(tdValue, profile, idx, field);
+
+      tr.appendChild(tdName);
+      tr.appendChild(tdType);
+      tr.appendChild(tdMode);
+      tr.appendChild(tdValue);
+      tbody.appendChild(tr);
+    });
+  }
+
+  // Update a field's mode, patch the in-memory profiles, and refresh the value cell.
+  window.updateFieldMode = function (profileId, fieldIndex, newMode) {
+    const idx = Number(fieldIndex);
+    const profile = profiles.find(p => p.id === profileId);
+    if (!profile) return;
+    const fields = (profile.fields || []).slice();
+    if (!fields[idx]) return;
+    fields[idx] = Object.assign({}, fields[idx], { mode: newMode });
+    profiles = SFFormData.profilePatch(profiles, profileId, { fields: fields });
+    // Refresh the value cell in the DOM
+    const tdValue = document.querySelector('[data-value-cell="' + idx + '"]');
+    const updated = profiles.find(p => p.id === profileId);
+    if (tdValue && updated) _renderValueCell(tdValue, updated, idx, fields[idx]);
+  };
+
+  // Update a pinned field's value in the in-memory profiles.
+  window.updateFieldValue = function (profileId, fieldIndex, newValue) {
+    const idx = Number(fieldIndex);
+    const profile = profiles.find(p => p.id === profileId);
+    if (!profile) return;
+    const fields = (profile.fields || []).slice();
+    if (!fields[idx]) return;
+    fields[idx] = Object.assign({}, fields[idx], { value: newValue });
+    profiles = SFFormData.profilePatch(profiles, profileId, { fields: fields });
+  };
+
+  // Return a preview sample for a detected field type using SFFormData.
+  window.previewGeneratedValue = function (detectedType) {
+    if (typeof SFFormData !== 'undefined' && SFFormData.generateCustomFieldValue) {
+      return SFFormData.generateCustomFieldValue(detectedType);
+    }
+    return '';
+  };
+
+  // Stub: adding fields to a captured form profile is not yet implemented (Task 6+).
+  window.addFieldToFormProfile = function () {
+    alert('Not yet implemented');
+  };
+
+  // Delete the currently open form-specific profile and return to the list.
+  window.deleteFormProfile = function () {
+    if (!currentEditId) return;
+    if (!confirm('Delete this form profile?')) return;
+    profiles = SFFormData.profilesDelete(profiles, currentEditId);
+    currentEditId = null;
+    persistProfiles().then(function () {
+      const formSection = document.getElementById('formSpecificProfileSection');
+      if (formSection) formSection.style.display = 'none';
+      const noSelected = document.getElementById('noProfileSelected');
+      if (noSelected) noSelected.style.display = 'block';
+      renderList();
+    });
+  };
+
+  // Persist any in-memory edits to chrome storage.
+  window.saveFormProfile = function () {
+    persistProfiles().then(function () {
+      const status = document.createElement('div');
+      status.className = 'status success';
+      status.textContent = 'Form profile saved.';
+      const formSection = document.getElementById('formSpecificProfileSection');
+      if (formSection) {
+        formSection.appendChild(status);
+        setTimeout(function () { status.remove(); }, 2000);
+      }
+    });
+  };
+
+  // ── End form-specific editor ──────────────────────────────────────────────
+
   // Render the profile editor
   function renderEditor(id) {
     const profile = profiles.find(p => p.id === id);
     if (!profile) return;
     currentEditId = id;
+
+    // Always hide the form-specific section before deciding which editor to show
+    const formSection = document.getElementById('formSpecificProfileSection');
+    if (formSection) formSection.style.display = 'none';
+
+    // Form-specific profiles have a dedicated editor
+    if (profile.formMetadata) {
+      renderFormSpecificProfileEditor(profile);
+      return;
+    }
 
     const editor = document.getElementById('profileEditor');
     const noSelected = document.getElementById('noProfileSelected');
@@ -825,4 +1006,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadProfiles();
   renderList();
   hideEditor();
+
+  // Expose a minimal test handle so unit tests can introspect internal state.
+  window.__sfOptions = {
+    getProfiles: function () { return profiles; },
+    renderEditor: renderEditor
+  };
 });
