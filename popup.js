@@ -39,13 +39,27 @@ document.addEventListener('DOMContentLoaded', async () => {
     provider: 'ollama',
     ollamaUrl: 'http://localhost:11434',
     model: 'llama3.1:latest',
-    openrouterModel: ''
+    openrouterModel: '',
+    anthropicModel: '',
+    openaiModel: ''
   };
+
+  // Display names for the popup's model badge and AI button.
+  const PROVIDER_LABELS = {
+    ollama: { name: 'Ollama (local)', button: '🧠 Fill with Local AI (Ollama)' },
+    openrouter: { name: 'OpenRouter', button: '🧠 Fill with OpenRouter AI' },
+    anthropic: { name: 'Anthropic', button: '🧠 Fill with Anthropic AI' },
+    openai: { name: 'OpenAI', button: '🧠 Fill with OpenAI' }
+  };
+  function providerLabel() {
+    return PROVIDER_LABELS[aiConfig.provider] || PROVIDER_LABELS.ollama;
+  }
 
   // Load saved settings + last used profile
   async function loadSettings() {
     const data = await chrome.storage.local.get([
-      'profiles', 'defaultProfile', 'provider', 'ollamaUrl', 'ollamaModel', 'openrouterModel', 'aiEnabled'
+      'profiles', 'defaultProfile', 'provider', 'ollamaUrl', 'ollamaModel', 'openrouterModel',
+      'anthropicModel', 'openaiModel', 'aiEnabled'
     ]);
 
     // Load and populate profiles
@@ -56,6 +70,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (data.ollamaUrl) aiConfig.ollamaUrl = data.ollamaUrl;
     if (data.ollamaModel) aiConfig.model = data.ollamaModel;
     if (data.openrouterModel) aiConfig.openrouterModel = data.openrouterModel;
+    if (data.anthropicModel) aiConfig.anthropicModel = data.anthropicModel;
+    if (data.openaiModel) aiConfig.openaiModel = data.openaiModel;
     if (typeof data.aiEnabled === 'boolean') aiConfig.enabled = data.aiEnabled;
 
     // Update AI button label
@@ -73,17 +89,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!modelInfo) return;
 
     const isOpenRouter = aiConfig.provider === 'openrouter';
-    const modelId = isOpenRouter
-      ? (aiConfig.openrouterModel || DEFAULT_OPENROUTER_MODEL)
-      : aiConfig.model;
+    let modelId;
+    if (isOpenRouter) modelId = aiConfig.openrouterModel || DEFAULT_OPENROUTER_MODEL;
+    else if (aiConfig.provider === 'anthropic') modelId = aiConfig.anthropicModel;
+    else if (aiConfig.provider === 'openai') modelId = aiConfig.openaiModel;
+    else modelId = aiConfig.model;
 
-    if (modelInfoProvider) modelInfoProvider.textContent = isOpenRouter ? 'OpenRouter' : 'Ollama (local)';
+    const labels = providerLabel();
+    if (modelInfoProvider) modelInfoProvider.textContent = labels.name;
 
     // Reflect the active provider on the AI fill button.
     const aiLabel = btnAI && btnAI.querySelector('span');
-    if (aiLabel) {
-      aiLabel.textContent = isOpenRouter ? '🧠 Fill with OpenRouter AI' : '🧠 Fill with Local AI (Ollama)';
-    }
+    if (aiLabel) aiLabel.textContent = labels.button;
 
     // Recommendation bullets only apply to OpenRouter model ids.
     const reasons = (isOpenRouter && modelId) ? getRecommendation({ id: modelId }) : null;
@@ -268,7 +285,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!lastScanResult || lastScanResult.fieldCount === 0) return;
       }
 
-      setStatus('Asking local AI (Ollama) for smart suggestions...', 'ok');
+      setStatus(`Asking ${providerLabel().name} for smart suggestions...`, 'ok');
 
       // 2. Ask background to call Ollama
       const aiResponse = await chrome.runtime.sendMessage({
@@ -280,7 +297,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
 
       if (!aiResponse?.success) {
-        const hint = aiResponse?.suggestion || aiResponse?.error || 'Check Ollama is running and model is pulled.';
+        const isOllama = !aiConfig.provider || aiConfig.provider === 'ollama';
+        const hint = aiResponse?.suggestion
+          || (isOllama ? 'Check Ollama is running and model is pulled.' : 'Check the API key and model in SmartForm settings.');
         showResult(`AI error: ${aiResponse?.error || 'Unknown'}. ${hint}`, 'error');
         setStatus('AI failed', 'error');
         return;
@@ -298,7 +317,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     } catch (err) {
       console.error(err);
-      showResult(`AI fill error: ${err.message}. Is Ollama running with the right OLLAMA_ORIGINS?`, 'error');
+      const isOllama = !aiConfig.provider || aiConfig.provider === 'ollama';
+      showResult(`AI fill error: ${err.message}.${isOllama ? ' Is Ollama running with the right OLLAMA_ORIGINS?' : ''}`, 'error');
       setStatus('AI error', 'error');
     }
   }

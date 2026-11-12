@@ -156,7 +156,7 @@
       outline-offset: 1px;
     }
     input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
-    input[type="text"], input[type="url"] {
+    input[type="text"], input[type="url"], input[type="password"] {
       width: 100%;
       box-sizing: border-box;
       padding: 10px 12px;
@@ -170,6 +170,22 @@
       border-radius: 8px;
       margin-bottom: 16px;
     }
+    /* API key + model rows for the Anthropic / OpenAI cards */
+    .inline-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+    .inline-row input, .inline-row select {
+      flex: 1 1 240px;
+      min-width: 0;
+      margin-bottom: 0;
+    }
+    .inline-row .btn { flex: 0 0 auto; }
+    .key-state { font-size: 13px; color: var(--text-muted); margin: 0 0 8px; }
+    .cloud-status { margin-top: 4px; margin-bottom: 12px; }
     table { color: var(--text); }
     th, td { border-color: var(--border); }
 
@@ -497,6 +513,22 @@
         <div class="desc">Access hundreds of models via API. Requires account + credits or API key.</div>
       </div>
     </label>
+
+    <label class="provider-option" id="provider-anthropic-label">
+      <input type="radio" name="provider" value="anthropic" id="provider-anthropic">
+      <div>
+        <div class="label">Anthropic (Cloud)</div>
+        <div class="desc">Claude models via your own Anthropic API key.</div>
+      </div>
+    </label>
+
+    <label class="provider-option" id="provider-openai-label">
+      <input type="radio" name="provider" value="openai" id="provider-openai">
+      <div>
+        <div class="label">OpenAI (Cloud)</div>
+        <div class="desc">GPT and o-series models via your own OpenAI API key.</div>
+      </div>
+    </label>
   </div>
 
   <!-- Ollama Settings -->
@@ -538,6 +570,54 @@
       <div id="currentModelCard" class="current-model-card">qwen/qwen3-coder</div>
       <p class="hint" id="currentModelHelp">Click the model card to browse and choose a different model.</p>
     </div>
+  </div>
+
+  <!-- Anthropic Settings -->
+  <div id="anthropicSettings" class="card" style="display: none;">
+    <div class="section-header">✳️ Anthropic Configuration</div>
+
+    <label for="anthropicApiKey">API Key</label>
+    <p id="anthropicKeyState" class="key-state">No key saved.</p>
+    <div class="inline-row">
+      <input type="password" id="anthropicApiKey" autocomplete="off" spellcheck="false" placeholder="sk-ant-…">
+      <button type="button" id="btnToggleAnthropicKey" class="btn btn-secondary" aria-pressed="false" aria-controls="anthropicApiKey">Show</button>
+      <button type="button" id="btnSaveAnthropicKey" class="btn">Save Key</button>
+    </div>
+    <div id="anthropicKeyStatus" class="status cloud-status" style="display:none;"></div>
+    <p class="hint">Create a key at <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer">console.anthropic.com/settings/keys</a>. The key is stored only in this browser profile (<code>chrome.storage.local</code>).</p>
+
+    <label for="anthropicModel">Model</label>
+    <div class="inline-row">
+      <select id="anthropicModel" class="select-full" disabled>
+        <option value="">Save an API key to load models</option>
+      </select>
+      <button type="button" id="btnLoadAnthropicModels" class="btn btn-secondary">Load models</button>
+    </div>
+    <div id="anthropicModelStatus" class="status cloud-status" style="display:none;"></div>
+  </div>
+
+  <!-- OpenAI Settings -->
+  <div id="openaiSettings" class="card" style="display: none;">
+    <div class="section-header">◎ OpenAI Configuration</div>
+
+    <label for="openaiApiKey">API Key</label>
+    <p id="openaiKeyState" class="key-state">No key saved.</p>
+    <div class="inline-row">
+      <input type="password" id="openaiApiKey" autocomplete="off" spellcheck="false" placeholder="sk-…">
+      <button type="button" id="btnToggleOpenAIKey" class="btn btn-secondary" aria-pressed="false" aria-controls="openaiApiKey">Show</button>
+      <button type="button" id="btnSaveOpenAIKey" class="btn">Save Key</button>
+    </div>
+    <div id="openaiKeyStatus" class="status cloud-status" style="display:none;"></div>
+    <p class="hint">Create a key at <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">platform.openai.com/api-keys</a>. The key is stored only in this browser profile (<code>chrome.storage.local</code>).</p>
+
+    <label for="openaiModel">Model</label>
+    <div class="inline-row">
+      <select id="openaiModel" class="select-full" disabled>
+        <option value="">Save an API key to load models</option>
+      </select>
+      <button type="button" id="btnLoadOpenAIModels" class="btn btn-secondary">Load models</button>
+    </div>
+    <div id="openaiModelStatus" class="status cloud-status" style="display:none;"></div>
   </div>
 
   <!-- Behavior -->
@@ -608,7 +688,7 @@
   </div>
 
   <p class="muted" style="text-align:center; font-size:12px; margin-top: 32px;">
-    SmartForm Filler v0.9.1 • Supports both local Ollama and OpenRouter
+    SmartForm Filler v0.9.1 • Supports local Ollama, OpenRouter, Anthropic and OpenAI
   </p>
 
   <!-- Model Selection Modal -->
@@ -654,6 +734,7 @@
   <script src="ai-field-detector.js"></script>
   <script src="form-registry.js"></script>
   <script src="profile-ui.js"></script>
+  <script src="cloud-providers.js"></script>
   <script src="options.js"></script>
 </body>
 </html>
