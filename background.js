@@ -617,8 +617,20 @@ async function seedProfiles(store) {
 }
 
 // Optional: on install, set some defaults
+// After install/update/reload, tabs that were already open still run the orphaned old
+// content script. Inject the current one so icons and shortcuts work without a page reload.
+async function injectIntoOpenTabs() {
+  if (!chrome.scripting || !chrome.tabs) return;
+  const files = (chrome.runtime.getManifest().content_scripts || [])[0]?.js || [];
+  const tabs = await chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] });
+  await Promise.all(tabs.map(tab =>
+    chrome.scripting.executeScript({ target: { tabId: tab.id }, files }).catch(() => {}) // restricted pages
+  ));
+}
+
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === 'install' || details.reason === 'update') {
+    injectIntoOpenTabs().catch(() => {});
     seedProfiles({ get: (k) => chrome.storage.local.get(k), set: (o) => chrome.storage.local.set(o) });
     // Only fill in missing settings — an update must not reset the user's choices.
     const defaults = {

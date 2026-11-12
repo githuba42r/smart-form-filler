@@ -7,7 +7,7 @@ function makeChrome(initial) {
         (Array.isArray(keys) ? keys : [keys]).reduce((o, k) => { if (k in data) o[k] = data[k]; return o; }, {})),
       set: (obj) => { Object.assign(data, obj); return Promise.resolve(); }
     } },
-    runtime: { onMessage: { addListener() {} }, lastError: null }
+    runtime: { id: 'test-extension-id', onMessage: { addListener() {} }, lastError: null }
   };
 }
 module.exports = { makeChrome };

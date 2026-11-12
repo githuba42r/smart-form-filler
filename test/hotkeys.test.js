@@ -45,6 +45,18 @@ function chromeWithEvents(initial) {
     eq(H.label({ ctrl: true, shift: true, code: 'KeyK' }), 'Ctrl+Shift+K', 'label');
     eq(H.resolve({ fillField: null }).fillField, null, 'stored null = disabled');
     eq(H.resolve({}).fillForm.code, 'KeyF', 'missing → default');
+    const altY = { alt: true, code: 'KeyY' };
+    ok(H.matchesChordKey(ev({ code: 'KeyF' }), 'KeyF', altY), 'chord key: plain F after Alt+Y');
+    ok(H.matchesChordKey(ev({ code: 'KeyF', altKey: true }), 'KeyF', altY), 'chord key: Alt still held from the leader');
+    ok(!H.matchesChordKey(ev({ code: 'KeyF', ctrlKey: true }), 'KeyF', altY), 'chord key: a modifier not in the leader is a different shortcut');
+    eq(H.browserConflict({ ctrl: true, code: 'KeyT' }), { what: 'New tab', reserved: true }, 'Ctrl+T is reserved');
+    eq(H.browserConflict({ alt: true, code: 'KeyD' }).what, 'Address bar', 'Alt+D is the address bar');
+    eq(H.browserConflict({ ctrl: true, shift: true, code: 'KeyI' }).what, 'Developer tools', 'Ctrl+Shift+I is devtools');
+    eq(H.browserConflict({ alt: true, code: 'KeyY' }), null, 'Alt+Y is free');
+    eq(H.browserConflict({ alt: true, shift: true, code: 'KeyF' }), null, 'default Alt+Shift+F is free');
+    eq(H.browserConflict({ alt: true, shift: true, code: 'KeyS' }), null, 'default Alt+Shift+S is free');
+    ok(/never receive/.test(H.conflictMessage({ ctrl: true, code: 'KeyW' })), 'reserved message explains pages never see it');
+    ok(H.riskyCombo({ ctrl: true, alt: true, code: 'KeyK' }), 'Ctrl+Alt flagged as risky');
     eq(H.resolve({}).chord.leader, null, 'chord leader defaults to empty');
     eq(H.resolve({ chord: { enabled: true } }).chord.enabled, false, 'chord without a leader is treated as off');
   }
@@ -90,6 +102,21 @@ function chromeWithEvents(initial) {
     eq((await chrome.storage.local.get(['hotkeys'])).hotkeys.fillForm, null, 'Backspace turns shortcut off');
     eq(btns()[0].textContent, 'Off', 'button shows Off');
 
+    btns()[0].click();
+    key(win, win.document.body, { code: 'KeyT', key: 't', ctrlKey: true });
+    await tick();
+    ok(/reserved by Chrome\/Brave/.test(win.document.getElementById('hotkeyStatus').textContent), 'reserved browser shortcut refused');
+    key(win, win.document.body, { code: 'KeyD', key: 'd', ctrlKey: true });
+    await tick();
+    ok(/Bookmark page/.test(win.document.getElementById('hotkeyStatus').textContent), 'browser shortcut refused, function named');
+    eq(btns()[0].textContent, 'Press keys…', 'still recording after a refused combo');
+    key(win, win.document.body, { code: 'KeyK', key: 'k', ctrlKey: true, altKey: true });
+    await tick();
+    ok(/Ctrl\+Alt combos/.test(win.document.getElementById('hotkeyStatus').textContent), 'Ctrl+Alt accepted with a warning');
+    eq((await chrome.storage.local.get(['hotkeys'])).hotkeys.fillForm.code, 'KeyK', 'Ctrl+Alt+K saved');
+
+    // A clashing combo saved before this check existed is flagged in the list
+    await chrome.storage.local.set({ hotkeys: { fillForm: { ctrl: true, alt: false, shift: false, meta: false, code: 'KeyD' } } });
     win.document.getElementById('btnResetHotkeys').click();
     await tick();
     eq(btns()[0].textContent, 'Alt+Shift+F', 'reset restores defaults');
@@ -254,6 +281,48 @@ function chromeWithEvents(initial) {
     // jsdom has no layout (every field counts as hidden), so only the message itself is checked here;
     // the real visible-field count is verified in Chromium.
     ok(sent.some(m => m.action === 'formStatus' && typeof m.count === 'number'), 'page reports its fillable field count for the toolbar icon');
+  }
+
+  section('orphaned copy after an extension reload');
+  {
+    const html = `<!DOCTYPE html><html><body><form>
+      <label for="h">Favourite hobby</label><input id="h" name="hobby" type="text" /></form></body></html>`;
+    const dom = new JSDOM(html, { runScripts: 'outside-only', pretendToBeVisual: true, url: 'https://test.example.com/' });
+    const win = dom.window, ctx = dom.getInternalVMContext();
+    const leader = { ctrl: false, alt: true, shift: false, meta: false, code: 'KeyY' };
+    const chrome = chromeWithEvents({ hotkeys: { chord: { enabled: true, leader } } });
+    chrome.runtime.sendMessage = (msg, cb) => { cb && cb(msg.action === 'callLLM' ? { result: 'Rowing' } : {}); };
+    win.chrome = chrome;
+    win.CSS = { escape: s => s };
+    ['vendor/address-schemas.js', 'formdata.js', 'profile-ui.js', 'ai-field-detector.js', 'form-registry.js', 'hotkeys.js']
+      .forEach(f => run(ctx, f));
+    win.__smartFormFillerLoaded = false;
+    run(ctx, 'content.js');
+    await tick(50);
+    const firstFill = win.__sfFillWithProfile;
+
+    run(ctx, 'content.js');
+    eq(win.__sfFillWithProfile, firstFill, 'second injection while alive is a no-op');
+
+    // Extension reloaded: the old copy's chrome.runtime.id disappears.
+    const orphanChrome = chrome;
+    delete orphanChrome.runtime.id;
+    const hobby = win.document.getElementById('h');
+    hobby.focus();
+    const e = key(win, hobby, { code: 'KeyY', key: 'y', altKey: true });
+    ok(!e.defaultPrevented && !win.document.querySelector('.sf-chord-hint'), 'orphaned copy stops reacting to shortcuts');
+
+    // background.js injects the fresh copy (new, live chrome object).
+    const fresh = chromeWithEvents({ hotkeys: { chord: { enabled: true, leader } } });
+    fresh.runtime.sendMessage = (msg, cb) => { cb && cb(msg.action === 'callLLM' ? { result: 'Rowing' } : {}); };
+    win.chrome = fresh;
+    run(ctx, 'content.js');
+    await tick(50);
+    ok(win.__sfFillWithProfile !== firstFill, 'fresh copy takes over from the orphan');
+    key(win, hobby, { code: 'KeyY', key: 'y', altKey: true });
+    key(win, hobby, { code: 'KeyS', key: 's', altKey: true });
+    await tick(50);
+    eq(hobby.value, 'Rowing', 'shortcuts work again without reloading the page');
   }
 
   section('settings cog in the on-page menu');

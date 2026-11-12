@@ -765,6 +765,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     btn.className = 'btn btn-secondary hotkey-btn' + (opts.value ? '' : ' off');
     btn.setAttribute('data-hotkey', opts.id);
     btn.textContent = opts.value || opts.emptyText || 'Off';
+    if (opts.combo && SFHotkeys.browserConflict(opts.combo)) {
+      const warn = document.createElement('div');
+      warn.className = 'hk-warn';
+      warn.textContent = '⚠ ' + SFHotkeys.conflictMessage(opts.combo);
+      text.appendChild(warn);
+    }
     btn.title = opts.single ? 'Click, then press a single key' : 'Click, then press a new shortcut';
     btn.disabled = !!opts.disabled;
     btn.addEventListener('click', () => startRecording(btn, opts));
@@ -781,7 +787,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const combo = hotkeySettings[action];
       hotkeyRow(hotkeyList, {
         id: action, name: H.ACTIONS[action].label, help: H.ACTIONS[action].help,
-        value: combo ? H.label(combo) : '',
+        value: combo ? H.label(combo) : '', combo,
         onCombo: (c) => {
           const clash = comboClash(c, action);
           if (clash) return H.label(c) + ' is already used for “' + clash + '”';
@@ -801,7 +807,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     hotkeyRow(chordList, {
       id: 'leader', name: 'Chord leader', disabled: !active, autoRecord: pending,
       help: 'Press this first — the ✨ form icon turns amber and waits for the next key.',
-      value: chord.leader ? H.label(chord.leader) : '',
+      value: chord.leader ? H.label(chord.leader) : '', combo: chord.leader,
       emptyText: 'Not set',
       onCombo: (c) => {
         const clash = comboClash(c, 'leader');
@@ -859,8 +865,17 @@ document.addEventListener('DOMContentLoaded', async () => {
           showHotkeyStatus('Include Ctrl, Alt or ⌘ (or use F1–F24) so typing isn’t hijacked', 'error');
           return;
         }
+        const browserClash = SFHotkeys.conflictMessage(combo);
+        if (browserClash) { showHotkeyStatus(browserClash, 'error'); return; }
         shown = SFHotkeys.label(combo);
         result = opts.onCombo(combo);
+        if (typeof result !== 'string' && SFHotkeys.riskyCombo(combo)) {
+          await result;
+          stop();
+          showHotkeyStatus(opts.name + ': ' + shown + ' — note Ctrl+Alt combos are often taken by the desktop ' +
+            '(and are AltGr on Windows); if it doesn’t fire, choose another', 'info');
+          return;
+        }
       }
       if (typeof result === 'string') { showHotkeyStatus(result, 'error'); return; }
       stop();

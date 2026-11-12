@@ -7,9 +7,19 @@
 (() => {
   'use strict';
 
-  // Guard against double-injection (manifest + popup's on-demand injectContentScript).
-  if (window.__smartFormFillerLoaded) return;
+  // An extension reload/update orphans running copies of this script (chrome.runtime.id
+  // disappears); background.js then injects a fresh copy into open tabs.
+  // Check the runtime this copy started with — a later copy may share this window.
+  const ownRuntime = (typeof chrome !== 'undefined' && chrome.runtime) || null;
+  function extensionAlive() {
+    try { return !!(ownRuntime && ownRuntime.id); } catch (_) { return false; }
+  }
+
+  // Guard against double-injection (manifest + popup's on-demand injectContentScript),
+  // but take over from a copy whose extension context is gone.
+  if (window.__smartFormFillerLoaded && (!window.__sfIsAlive || window.__sfIsAlive())) return;
   window.__smartFormFillerLoaded = true;
+  window.__sfIsAlive = extensionAlive;
 
   // In-memory store for the current page's detected fields (live element references)
   let detectedFields = [];
@@ -1616,10 +1626,13 @@
     setTimeout(() => { buildScheduled = false; ensureScanButtons(); }, 300);
   }
 
+  let formObserver = null;
   function initFormIcons() {
     try {
-      const mo = new MutationObserver(scheduleBuild);
-      mo.observe(document.documentElement, { childList: true, subtree: true });
+      // Icons left behind by an orphaned copy of this script (pre-update) belong to nobody now.
+      document.querySelectorAll('button[' + SF_UI_ATTR + ']').forEach(b => b.remove());
+      formObserver = new MutationObserver(() => { if (!teardownIfOrphaned()) scheduleBuild(); });
+      formObserver.observe(document.documentElement, { childList: true, subtree: true });
       window.addEventListener('scroll', scheduleReposition, true); // capture = catch inner scroll
       window.addEventListener('resize', scheduleReposition);
       scheduleBuild();
@@ -1797,7 +1810,7 @@
       if (/^(Control|Alt|Shift|Meta|OS)/.test(e.code)) return; // still releasing the leader
       e.preventDefault(); e.stopPropagation();
       if (e.repeat) return;
-      const action = Object.keys(H.ACTIONS).find(a => H.matchesChordKey(e, chord.keys[a]));
+      const action = Object.keys(H.ACTIONS).find(a => H.matchesChordKey(e, chord.keys[a], chord.leader));
       cancelChord();
       if (action) runHotkeyAction(action);
       else if (e.key !== 'Escape') showToast('SmartForm: no action on ' + (e.key || e.code));
@@ -1817,8 +1830,28 @@
     }
   }
 
+  // Orphaned copy: stop reacting and remove our on-page UI so the fresh copy owns the page.
+  let tornDown = false;
+  function teardownIfOrphaned() {
+    if (tornDown || extensionAlive()) return false;
+    tornDown = true;
+    if (window.__sfIsAlive === extensionAlive) window.__smartFormFillerLoaded = false; // let a fresh copy in
+    window.removeEventListener('keydown', onHotkeyGuarded, true);
+    if (formObserver) formObserver.disconnect();
+    cancelChord();
+    formButtons.forEach(({ btn }) => btn.remove());
+    formButtons = [];
+    closeFillMenu();
+    return true;
+  }
+
+  function onHotkeyGuarded(e) {
+    if (teardownIfOrphaned()) return;
+    onHotkey(e);
+  }
+
   loadHotkeys();
-  window.addEventListener('keydown', onHotkey, true);
+  window.addEventListener('keydown', onHotkeyGuarded, true);
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initFormIcons, { once: true });
