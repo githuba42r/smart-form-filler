@@ -10,6 +10,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   const providerRadios = document.querySelectorAll('input[name="provider"]');
   const ollamaSettings = document.getElementById('ollamaSettings');
   const openrouterSettings = document.getElementById('openrouterSettings');
+  const anthropicSettings = document.getElementById('anthropicSettings');
+  const openaiSettings = document.getElementById('openaiSettings');
 
   // Ollama elements
   const ollamaUrlInput = document.getElementById('ollamaUrl');
@@ -111,6 +113,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       'provider',
       'ollamaUrl', 'ollamaModel',
       'openrouterApiKey', 'openrouterModel',
+      'anthropicApiKey', 'anthropicModel',
+      'openaiApiKey', 'openaiModel',
       'defaultProfile'
     ]);
 
@@ -141,6 +145,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     showCurrentOpenRouterModel(currentSettings.openrouterModel);
 
+    // Anthropic / OpenAI: show the masked saved key and load the live model list.
+    CLOUD_PROVIDERS.forEach(cfg => initCloudProvider(cfg));
+
     // Behavior
     if (currentSettings.defaultProfile) defaultProfileSelect.value = currentSettings.defaultProfile;
   }
@@ -155,6 +162,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Show/hide settings panels
     if (ollamaSettings) ollamaSettings.style.display = (provider === 'ollama') ? 'block' : 'none';
     if (openrouterSettings) openrouterSettings.style.display = (provider === 'openrouter') ? 'block' : 'none';
+    if (anthropicSettings) anthropicSettings.style.display = (provider === 'anthropic') ? 'block' : 'none';
+    if (openaiSettings) openaiSettings.style.display = (provider === 'openai') ? 'block' : 'none';
+  }
+
+  // Check a provider radio and show its card (used after saving a key).
+  async function selectProvider(provider) {
+    const r = document.getElementById(`provider-${provider}`);
+    if (r) r.checked = true;
+    currentSettings.provider = provider;
+    await chrome.storage.local.set({ provider });
+    updateProviderUI(provider);
   }
 
   // Provider radio change
@@ -167,15 +185,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // Make the whole label clickable
-  const ollamaLabel = document.getElementById('provider-ollama-label');
-  const openrouterLabel = document.getElementById('provider-openrouter-label');
-  if (ollamaLabel) ollamaLabel.addEventListener('click', () => {
-    const r = document.getElementById('provider-ollama');
-    if (r) { r.checked = true; r.dispatchEvent(new Event('change')); }
-  });
-  if (openrouterLabel) openrouterLabel.addEventListener('click', () => {
-    const r = document.getElementById('provider-openrouter');
-    if (r) { r.checked = true; r.dispatchEvent(new Event('change')); }
+  ['ollama', 'openrouter', 'anthropic', 'openai'].forEach(p => {
+    const label = document.getElementById(`provider-${p}-label`);
+    if (label) label.addEventListener('click', () => {
+      const r = document.getElementById(`provider-${p}`);
+      if (r) { r.checked = true; r.dispatchEvent(new Event('change')); }
+    });
   });
 
   // ========== OLLAMA ==========
@@ -531,6 +546,173 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   wireSeg(segCost, 'cost');
   wireSeg(segQuality, 'quality');
+
+  // ========== ANTHROPIC + OPENAI (API key) ==========
+  // Both cards share one wiring: key input + show/hide + Save Key, and a model
+  // <select> filled live from the provider's models API (SFCloudProviders).
+  const CLOUD_PROVIDERS = [
+    { id: 'anthropic', name: 'Anthropic', keyField: 'anthropicApiKey', modelField: 'anthropicModel' },
+    { id: 'openai', name: 'OpenAI', keyField: 'openaiApiKey', modelField: 'openaiModel' }
+  ];
+
+  function showCloudStatus(el, text, kind, hideAfterMs) {
+    if (!el) return;
+    clearTimeout(el._hideTimer);
+    el.textContent = text;
+    el.className = `status cloud-status ${kind}`;
+    el.style.display = 'block';
+    if (hideAfterMs) el._hideTimer = setTimeout(() => { el.style.display = 'none'; }, hideAfterMs);
+  }
+
+  function cloudEls(cfg) {
+    const N = cfg.name;
+    return {
+      keyInput: document.getElementById(`${cfg.id}ApiKey`),
+      keyState: document.getElementById(`${cfg.id}KeyState`),
+      keyStatus: document.getElementById(`${cfg.id}KeyStatus`),
+      btnToggle: document.getElementById(`btnToggle${N}Key`),
+      btnSave: document.getElementById(`btnSave${N}Key`),
+      select: document.getElementById(`${cfg.id}Model`),
+      btnLoad: document.getElementById(`btnLoad${N}Models`),
+      modelStatus: document.getElementById(`${cfg.id}ModelStatus`)
+    };
+  }
+
+  function renderKeyState(cfg, els) {
+    if (!els.keyState) return;
+    const key = currentSettings[cfg.keyField];
+    els.keyState.textContent = key
+      ? `✅ Key saved (${SFCloudProviders.maskKey(key)})`
+      : 'No key saved.';
+    if (els.keyInput) {
+      els.keyInput.placeholder = key ? `${SFCloudProviders.maskKey(key)} — paste a new key to replace` : (cfg.id === 'anthropic' ? 'sk-ant-…' : 'sk-…');
+    }
+  }
+
+  function setSelectPlaceholder(select, text) {
+    select.innerHTML = '';
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = text;
+    select.appendChild(opt);
+  }
+
+  async function loadCloudModels(cfg, els) {
+    if (!els.select) return;
+    const key = (els.keyInput && els.keyInput.value.trim()) || currentSettings[cfg.keyField];
+    if (!key) {
+      setSelectPlaceholder(els.select, 'Save an API key to load models');
+      els.select.disabled = true;
+      showCloudStatus(els.modelStatus, `Enter and save your ${cfg.name} API key first.`, 'info');
+      return;
+    }
+
+    els.select.disabled = true;
+    if (els.btnLoad) els.btnLoad.disabled = true;
+    setSelectPlaceholder(els.select, 'Loading models…');
+    showCloudStatus(els.modelStatus, `Loading models from ${cfg.name}…`, 'info');
+
+    try {
+      const models = await SFCloudProviders.fetchModels(cfg.id, key);
+      const saved = currentSettings[cfg.modelField] || '';
+      const selected = SFCloudProviders.pickDefaultModel(cfg.id, models, saved);
+
+      els.select.innerHTML = '';
+      if (!selected) {
+        const ph = document.createElement('option');
+        ph.value = '';
+        ph.textContent = '— Select a model —';
+        els.select.appendChild(ph);
+      }
+      if (saved && !models.some(m => m.id === saved)) {
+        const missing = document.createElement('option');
+        missing.value = saved;
+        missing.textContent = `${saved} (saved; not in the current list)`;
+        els.select.appendChild(missing);
+      }
+      models.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = m.label;
+        els.select.appendChild(opt);
+      });
+      els.select.value = selected;
+      els.select.disabled = false;
+
+      // Persist an automatic preselection (Anthropic only) so the background
+      // worker uses what the page shows.
+      if (selected && selected !== saved) {
+        currentSettings[cfg.modelField] = selected;
+        await chrome.storage.local.set({ [cfg.modelField]: selected });
+      }
+
+      if (!models.length) {
+        showCloudStatus(els.modelStatus, `No usable models returned by ${cfg.name} for this key.`, 'error');
+      } else {
+        showCloudStatus(els.modelStatus,
+          `✅ Loaded ${models.length} model${models.length === 1 ? '' : 's'}${selected ? '' : ' — pick one to use'}.`,
+          'success', selected ? 2500 : 0);
+      }
+    } catch (err) {
+      setSelectPlaceholder(els.select, 'Models unavailable');
+      els.select.disabled = true;
+      showCloudStatus(els.modelStatus, `❌ ${SFCloudProviders.describeError(err)}`, 'error');
+    } finally {
+      if (els.btnLoad) els.btnLoad.disabled = false;
+    }
+  }
+
+  function wireCloudProvider(cfg) {
+    const els = cloudEls(cfg);
+    cfg.els = els;
+
+    if (els.btnToggle && els.keyInput) els.btnToggle.addEventListener('click', () => {
+      const show = els.keyInput.type === 'password';
+      els.keyInput.type = show ? 'text' : 'password';
+      els.btnToggle.textContent = show ? 'Hide' : 'Show';
+      els.btnToggle.setAttribute('aria-pressed', String(show));
+    });
+
+    if (els.btnSave) els.btnSave.addEventListener('click', async () => {
+      const key = els.keyInput ? els.keyInput.value.trim() : '';
+      if (!key) {
+        showCloudStatus(els.keyStatus, `Paste your ${cfg.name} API key first.`, 'error');
+        return;
+      }
+      currentSettings[cfg.keyField] = key;
+      await chrome.storage.local.set({ [cfg.keyField]: key });
+      await selectProvider(cfg.id);
+      els.keyInput.value = '';
+      els.keyInput.type = 'password';
+      if (els.btnToggle) { els.btnToggle.textContent = 'Show'; els.btnToggle.setAttribute('aria-pressed', 'false'); }
+      renderKeyState(cfg, els);
+      showCloudStatus(els.keyStatus, `✅ ${cfg.name} key saved. ${cfg.name} is now the active provider.`, 'success', 3000);
+      await loadCloudModels(cfg, els);
+    });
+
+    if (els.btnLoad) els.btnLoad.addEventListener('click', () => loadCloudModels(cfg, els));
+
+    if (els.select) els.select.addEventListener('change', async () => {
+      const model = els.select.value;
+      if (!model) return;
+      currentSettings[cfg.modelField] = model;
+      await chrome.storage.local.set({ [cfg.modelField]: model });
+      showCloudStatus(els.modelStatus, `✅ Model saved: ${model}`, 'success', 2000);
+    });
+  }
+
+  function initCloudProvider(cfg) {
+    const els = cfg.els || cloudEls(cfg);
+    renderKeyState(cfg, els);
+    // Don't block the rest of page boot on a network call.
+    if (currentSettings[cfg.keyField]) loadCloudModels(cfg, els);
+  }
+
+  if (typeof SFCloudProviders !== 'undefined') {
+    CLOUD_PROVIDERS.forEach(wireCloudProvider);
+  } else {
+    CLOUD_PROVIDERS.length = 0; // helper script missing: leave the cards inert
+  }
 
   // ========== BEHAVIOR ==========
   // ========== KEYBOARD SHORTCUTS ==========

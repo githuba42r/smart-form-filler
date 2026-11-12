@@ -202,11 +202,14 @@ Return the JSON now:`;
 
 /**
  * Dispatch a plain-text prompt to the configured LLM provider.
- * Reads provider settings from chrome.storage.sync.
+ * Reads provider settings from chrome.storage.local.
  * @returns {Promise<string>} The model's text response.
  */
 async function callLLM(prompt, timeoutMs = 10000) {
-  const settings = await chrome.storage.local.get(['provider', 'ollamaUrl', 'ollamaModel', 'openrouterApiKey', 'openrouterModel']);
+  const settings = await chrome.storage.local.get([
+    'provider', 'ollamaUrl', 'ollamaModel', 'openrouterApiKey', 'openrouterModel',
+    'anthropicApiKey', 'anthropicModel', 'openaiApiKey', 'openaiModel'
+  ]);
   const provider = settings.provider || 'ollama';
 
   if (provider === 'ollama') {
@@ -215,6 +218,10 @@ async function callLLM(prompt, timeoutMs = 10000) {
   } else if (provider === 'openrouter') {
     return await callOpenRouter(prompt, settings.openrouterApiKey, timeoutMs,
       settings.openrouterModel || DEFAULT_OPENROUTER_MODEL);
+  } else if (provider === 'anthropic') {
+    return await callAnthropic(prompt, settings.anthropicApiKey, settings.anthropicModel, timeoutMs);
+  } else if (provider === 'openai') {
+    return await callOpenAI(prompt, settings.openaiApiKey, settings.openaiModel, timeoutMs);
   } else {
     throw new Error(`Unknown LLM provider: ${provider}`);
   }
@@ -294,6 +301,194 @@ async function callOpenRouter(prompt, apiKey, timeoutMs, model) {
 }
 
 // ---------------------------------------------------------------------------
+// Anthropic + OpenAI (direct API key) providers
+// ---------------------------------------------------------------------------
+
+const ANTHROPIC_API_BASE = 'https://api.anthropic.com/v1';
+const ANTHROPIC_VERSION = '2023-06-01';
+// Used only when the user saved a key but never picked a model (the settings
+// page normally saves its preselection). Fast and cheap for form filling.
+const DEFAULT_ANTHROPIC_MODEL = 'claude-haiku-5-5';
+const OPENAI_API_BASE = 'https://api.openai.com/v1';
+
+/**
+ * Build an Error for a non-2xx provider response: "<Provider> API error <status>: <message>".
+ * Both Anthropic and OpenAI return { error: { message } } bodies.
+ */
+async function providerHttpError(providerName, response) {
+  let detail = response.statusText || '';
+  try {
+    const text = await response.text();
+    if (text) {
+      detail = text;
+      try {
+        const body = JSON.parse(text);
+        if (body && body.error && body.error.message) detail = body.error.message;
+      } catch (_) { /* not JSON: keep raw text */ }
+    }
+  } catch (_) { /* body unreadable: keep statusText */ }
+  const err = new Error(`${providerName} API error ${response.status}: ${detail}`.trim());
+  err.status = response.status;
+  return err;
+}
+
+/** Re-throw fetch failures with the provider name, turning aborts into a timeout message. */
+function providerCallError(providerName, err, timeoutMs) {
+  if (err && err.name === 'AbortError') {
+    return new Error(`${providerName} request timed out after ${timeoutMs}ms`);
+  }
+  // Already formatted (providerHttpError or our own provider-named errors).
+  if (err && (err.status || String(err.message || '').startsWith(providerName))) return err;
+  return new Error(`${providerName} call failed: ${err && err.message ? err.message : String(err)}`);
+}
+
+/**
+ * Call the Anthropic Messages API with a plain-text prompt.
+ * @returns {Promise<string>} concatenated text blocks of the response.
+ */
+async function callAnthropic(prompt, apiKey, model, timeoutMs = 10000) {
+  if (!apiKey) throw new Error('No Anthropic API key configured. Add one in SmartForm settings.');
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(`${ANTHROPIC_API_BASE}/messages`, {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': ANTHROPIC_VERSION,
+        'content-type': 'application/json',
+        // Requests originate from an extension context (browser CORS rules apply).
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model: model || DEFAULT_ANTHROPIC_MODEL,
+        max_tokens: 16000,
+        messages: [{ role: 'user', content: prompt }]
+      }),
+      signal: controller.signal
+    });
+
+    if (!response.ok) throw await providerHttpError('Anthropic', response);
+
+    const data = await response.json();
+    const text = (data.content || [])
+      .filter(b => b && b.type === 'text' && typeof b.text === 'string')
+      .map(b => b.text)
+      .join('');
+    if (!text && data.stop_reason === 'refusal') {
+      throw new Error('Anthropic declined the request (stop_reason: refusal).');
+    }
+    return text;
+  } catch (err) {
+    throw providerCallError('Anthropic', err, timeoutMs);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Call the OpenAI Chat Completions API with a plain-text prompt.
+ * There is deliberately no default model: the user must pick one in settings.
+ * @returns {Promise<string>}
+ */
+async function callOpenAI(prompt, apiKey, model, timeoutMs = 10000) {
+  if (!apiKey) throw new Error('No OpenAI API key configured. Add one in SmartForm settings.');
+  if (!model) throw new Error('Select an OpenAI model in SmartForm settings');
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(`${OPENAI_API_BASE}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'user', content: prompt }]
+      }),
+      signal: controller.signal
+    });
+
+    if (!response.ok) throw await providerHttpError('OpenAI', response);
+
+    const data = await response.json();
+    return data.choices?.[0]?.message?.content || '';
+  } catch (err) {
+    throw providerCallError('OpenAI', err, timeoutMs);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/** Strip code fences / stray prose and parse the first JSON object in an LLM reply. */
+function parseJSONFromLLM(content) {
+  let text = String(content || '').trim()
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (jsonMatch) text = jsonMatch[0];
+  return JSON.parse(text);
+}
+
+/**
+ * Popup "Fill with AI" for the Anthropic / OpenAI providers: same contract as
+ * callOllamaForFormData ({success, data, modelUsed} | {success:false, error}).
+ */
+async function callCloudForFormData(provider, fields, context, settings) {
+  const fieldDescriptions = fields.map((f, i) =>
+    `${i}. Label: "${f.label}" | Name: "${f.name}" | Type: ${f.type} | Placeholder: "${f.placeholder}"`
+  ).join('\n');
+
+  const prompt = `You are an expert Australian test data generator creating realistic, consistent, privacy-safe data for web form testing.
+
+Output ONLY valid minified JSON mapping each field index (string key) to a test value string.
+
+Rules:
+- ONE consistent fictional person across the form.
+- Prefer Australian (Brisbane/QLD) data.
+- Use obviously fake values.
+- Passwords like "DevTest2026!".
+- Short professional test sentences for textareas.
+- Dates in YYYY-MM-DD.
+- No markdown, no explanations: JSON only.
+
+Context: ${context || 'Development form'}
+
+Fields:
+${fieldDescriptions}
+
+Return the JSON now:`;
+
+  const isAnthropic = provider === 'anthropic';
+  const providerName = isAnthropic ? 'Anthropic' : 'OpenAI';
+  const model = isAnthropic ? (settings.anthropicModel || DEFAULT_ANTHROPIC_MODEL) : settings.openaiModel;
+
+  try {
+    const content = isAnthropic
+      ? await callAnthropic(prompt, settings.anthropicApiKey, model, 60000)
+      : await callOpenAI(prompt, settings.openaiApiKey, model, 60000);
+    let parsed;
+    try {
+      parsed = parseJSONFromLLM(content);
+    } catch (_) {
+      throw new Error(`${providerName} returned invalid JSON.`);
+    }
+    lastAISuggestion = parsed;
+    return { success: true, data: parsed, modelUsed: model };
+  } catch (err) {
+    console.error(`[SmartForm Background] ${providerName} call failed:`, err);
+    return { success: false, error: err.message || String(err) };
+  }
+}
+
+// ---------------------------------------------------------------------------
 
 /**
  * Message listener from popup or content scripts.
@@ -301,10 +496,16 @@ async function callOpenRouter(prompt, apiKey, timeoutMs, model) {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === 'generateWithAI') {
     // Route based on provider saved in storage
-    chrome.storage.local.get(['provider', 'ollamaUrl', 'ollamaModel', 'openrouterApiKey', 'openrouterModel']).then(settings => {
+    chrome.storage.local.get([
+      'provider', 'ollamaUrl', 'ollamaModel', 'openrouterApiKey', 'openrouterModel',
+      'anthropicApiKey', 'anthropicModel', 'openaiApiKey', 'openaiModel'
+    ]).then(settings => {
       const provider = settings.provider || 'ollama';
 
-      if (provider === 'openrouter') {
+      if (provider === 'anthropic' || provider === 'openai') {
+        callCloudForFormData(provider, msg.fields || [], msg.context || '', settings)
+          .then(result => sendResponse(result));
+      } else if (provider === 'openrouter') {
         callOpenRouterForFormData(msg.fields || [], msg.context || '', {
           apiKey: settings.openrouterApiKey,
           model: settings.openrouterModel || msg.model
