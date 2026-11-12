@@ -6,6 +6,7 @@
  */
 
 const DEFAULT_OLLAMA_URL = 'http://localhost:11434';
+const DEFAULT_OPENROUTER_MODEL = 'qwen/qwen3-coder'; // mirrors recommendations.js
 const DEFAULT_OLLAMA_MODEL = 'llama3.1:latest'; // Good balance; qwen2.5-coder, gemma2, phi4 also excellent for JSON
 
 // In-memory cache of last AI suggestion (optional)
@@ -205,13 +206,15 @@ Return the JSON now:`;
  * @returns {Promise<string>} The model's text response.
  */
 async function callLLM(prompt, timeoutMs = 10000) {
-  const settings = await chrome.storage.local.get(['provider', 'ollamaUrl', 'openrouterApiKey']);
+  const settings = await chrome.storage.local.get(['provider', 'ollamaUrl', 'ollamaModel', 'openrouterApiKey', 'openrouterModel']);
   const provider = settings.provider || 'ollama';
 
   if (provider === 'ollama') {
-    return await callOllama(prompt, settings.ollamaUrl || DEFAULT_OLLAMA_URL, timeoutMs);
+    return await callOllama(prompt, settings.ollamaUrl || DEFAULT_OLLAMA_URL, timeoutMs,
+      settings.ollamaModel || DEFAULT_OLLAMA_MODEL);
   } else if (provider === 'openrouter') {
-    return await callOpenRouter(prompt, settings.openrouterApiKey, timeoutMs);
+    return await callOpenRouter(prompt, settings.openrouterApiKey, timeoutMs,
+      settings.openrouterModel || DEFAULT_OPENROUTER_MODEL);
   } else {
     throw new Error(`Unknown LLM provider: ${provider}`);
   }
@@ -221,7 +224,7 @@ async function callLLM(prompt, timeoutMs = 10000) {
  * Call Ollama /api/generate with a plain-text prompt.
  * @returns {Promise<string>}
  */
-async function callOllama(prompt, url, timeoutMs) {
+async function callOllama(prompt, url, timeoutMs, model) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -230,7 +233,7 @@ async function callOllama(prompt, url, timeoutMs) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'mistral:latest',
+        model,
         prompt,
         stream: false,
         temperature: 0.3
@@ -253,7 +256,7 @@ async function callOllama(prompt, url, timeoutMs) {
  * Call OpenRouter chat completions API with a plain-text prompt.
  * @returns {Promise<string>}
  */
-async function callOpenRouter(prompt, apiKey, timeoutMs) {
+async function callOpenRouter(prompt, apiKey, timeoutMs, model) {
   if (!apiKey) throw new Error('No OpenRouter API key configured.');
 
   const controller = new AbortController();
@@ -269,7 +272,7 @@ async function callOpenRouter(prompt, apiKey, timeoutMs) {
         'X-Title': 'SmartForm Filler'
       },
       body: JSON.stringify({
-        model: 'mistral-7b-instruct',
+        model,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.3
       }),
@@ -398,11 +401,17 @@ async function seedProfiles(store) {
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === 'install' || details.reason === 'update') {
     seedProfiles({ get: (k) => chrome.storage.local.get(k), set: (o) => chrome.storage.local.set(o) });
-    chrome.storage.local.set({
+    // Only fill in missing settings — an update must not reset the user's choices.
+    const defaults = {
       ollamaUrl: DEFAULT_OLLAMA_URL,
       ollamaModel: DEFAULT_OLLAMA_MODEL,
-      openrouterModel: 'qwen/qwen3-coder', // Qwen3 Coder 480B default
+      openrouterModel: DEFAULT_OPENROUTER_MODEL,
       aiEnabled: true
+    };
+    chrome.storage.local.get(Object.keys(defaults)).then(cur => {
+      const missing = {};
+      Object.keys(defaults).forEach(k => { if (cur[k] === undefined || cur[k] === '') missing[k] = defaults[k]; });
+      if (Object.keys(missing).length) chrome.storage.local.set(missing);
     });
     console.log('[SmartForm] Extension installed. Default Ollama config set.');
   }

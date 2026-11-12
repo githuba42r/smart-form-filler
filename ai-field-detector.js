@@ -178,15 +178,20 @@
   // ---------------------------------------------------------------------------
   // LLM call via background service worker
   // ---------------------------------------------------------------------------
-  function _callLLM(prompt) {
+  // Whole-form detection is a big prompt; large cloud models need longer than a single value.
+  var DETECT_TIMEOUT_MS = 30000;
+  var VALUE_TIMEOUT_MS  = 15000;
+
+  function _callLLM(prompt, timeoutMs) {
+    timeoutMs = timeoutMs || VALUE_TIMEOUT_MS;
     return new Promise(function (resolve) {
       var timeout = setTimeout(function () {
-        resolve({ error: 'LLM timeout after 10000ms' });
-      }, 10000);
+        resolve({ error: 'LLM timeout after ' + timeoutMs + 'ms' });
+      }, timeoutMs);
 
       try {
         root.chrome.runtime.sendMessage(
-          { action: 'callLLM', prompt: prompt, timeoutMs: 10000 },
+          { action: 'callLLM', prompt: prompt, timeoutMs: timeoutMs },
           function (response) {
             clearTimeout(timeout);
             var lastErr = root.chrome && root.chrome.runtime && root.chrome.runtime.lastError;
@@ -324,7 +329,7 @@
     // Cache miss — call LLM
     var prompt = _buildDetectionPrompt(fields);
 
-    return _callLLM(prompt).then(function (response) {
+    return _callLLM(prompt, DETECT_TIMEOUT_MS).then(function (response) {
       if (response && response.result) {
         var parsed = _parseLLMFields(response.result);
         if (parsed) {
