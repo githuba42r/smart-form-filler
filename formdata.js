@@ -128,6 +128,34 @@
       policy:{ groups:{ name:true, contact:false, address:false, account:false, misc:false }, exclude:[] }, pins:{} }
   ];
 
+  // Date helpers. Dates travel as ISO 'YYYY-MM-DD' strings; formatDate renders them for a field.
+  const MONTH_NAMES = ['January','February','March','April','May','June','July',
+    'August','September','October','November','December'];
+  function _pad2(n) { return String(n).padStart(2, '0'); }
+  function _daysInMonth(y, m) { return new Date(Date.UTC(y, m, 0)).getUTCDate(); }
+  function parseISODate(iso) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
+    return m ? { year: +m[1], month: +m[2], day: +m[3] } : null;
+  }
+  // Valid birth date for an adult aged 18–79.
+  function _dob(rng) {
+    const year  = new Date().getFullYear() - 18 - Math.floor(rng() * 62);
+    const month = 1 + Math.floor(rng() * 12);
+    const day   = 1 + Math.floor(rng() * _daysInMonth(year, month));
+    return `${year}-${_pad2(month)}-${_pad2(day)}`;
+  }
+  // formatDate('1985-03-07', 'DD/MM/YYYY') → '07/03/1985'. Tokens: YYYY YY MMMM MMM MM M DD D.
+  function formatDate(iso, format) {
+    const d = parseISODate(iso);
+    if (!d) return iso;
+    const tokens = {
+      YYYY: String(d.year), YY: String(d.year).slice(2),
+      MMMM: MONTH_NAMES[d.month - 1], MMM: MONTH_NAMES[d.month - 1].slice(0, 3),
+      MM: _pad2(d.month), M: String(d.month), DD: _pad2(d.day), D: String(d.day)
+    };
+    return String(format || 'YYYY-MM-DD').replace(/YYYY|YY|MMMM|MMM|MM|M|DD|D/g, t => tokens[t]);
+  }
+
   function generatePerson(profile, opts) {
     opts = opts || {};
     const seed = (opts.seed != null) ? opts.seed : Math.floor(Math.random() * 1e9);
@@ -149,7 +177,7 @@
       street1: `${streetNo} ${_pick(rng, L.streets)}`, street2: '',
       city: row.city, state: row.state, zip, country,
       password: `Dev${tag}!aZ`,
-      dob: `19${70 + Math.floor(rng() * 30)}-0${1 + Math.floor(rng() * 9)}-1${Math.floor(rng() * 9)}`,
+      dob: _dob(rng),
       business: `${lastname} ${_pick(rng, ['Holdings','Labs','Group','Trading'])} Pty Ltd`,
       genericText: 'Automated test input generated for development and QA validation.'
     };
@@ -189,9 +217,10 @@
     serial:      function () { return 'SN-' + _shortDate() + '-' + _randDigits(5); }
   };
 
+  // Returns '' for types without a generator — those values are chosen by the AI at fill time.
   function generateCustomFieldValue(detectedType) {
     if (detectedType in CUSTOM_GENERATORS) return CUSTOM_GENERATORS[detectedType]();
-    return 'text_' + detectedType + '_' + Math.random();
+    return '';
   }
 
   // Profile CRUD data-ops
@@ -217,5 +246,5 @@
   function profilesDelete(profiles, id) { return profiles.length <= 1 ? profiles : profiles.filter(p => p.id !== id); }
   function profilePatch(profiles, id, patch) { return profiles.map(p => p.id === id ? Object.assign({}, p, patch) : p); }
 
-  root.SFFormData = { FIELD_GROUPS, CANONICAL_TO_ENGINE, ENGINE_TO_CANONICAL, groupForField, toEngineValues, LOCALES, generatePerson, applyPins, MENU_ONLY, shouldFill, applyPolicy, resolveValues, PROFILES_VERSION, DEFAULT_PROFILES, profilesCreate, profilesClone, profilesRename, profilesDelete, profilePatch, CUSTOM_GENERATORS, generateCustomFieldValue };
+  root.SFFormData = { FIELD_GROUPS, CANONICAL_TO_ENGINE, ENGINE_TO_CANONICAL, groupForField, toEngineValues, LOCALES, generatePerson, applyPins, MENU_ONLY, shouldFill, applyPolicy, resolveValues, PROFILES_VERSION, DEFAULT_PROFILES, profilesCreate, profilesClone, profilesRename, profilesDelete, profilePatch, CUSTOM_GENERATORS, generateCustomFieldValue, MONTH_NAMES, parseISODate, formatDate };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -408,4 +408,24 @@ chrome.runtime.onInstalled.addListener((details) => {
   }
 });
 
+// Right-click on a form field → "Fill with AI suggestion" (handled by content.js).
+const AI_FIELD_MENU_ID = 'sf-ai-suggest-field';
+if (chrome.contextMenus) {
+  chrome.runtime.onInstalled.addListener(() => {
+    chrome.contextMenus.removeAll(() => {
+      chrome.contextMenus.create({
+        id: AI_FIELD_MENU_ID,
+        title: 'SmartForm: Fill this field with AI suggestion',
+        contexts: ['editable']
+      });
+    });
+  });
+  chrome.contextMenus.onClicked.addListener((info, tab) => {
+    if (info.menuItemId !== AI_FIELD_MENU_ID || !tab || tab.id == null) return;
+    chrome.tabs.sendMessage(tab.id, { action: 'aiSuggestField' }, { frameId: info.frameId || 0 }, () => {
+      void chrome.runtime.lastError; // no content script in that frame — nothing to do
+    });
+  });
+}
+
 console.log('[SmartForm Filler] Background service worker ready.');

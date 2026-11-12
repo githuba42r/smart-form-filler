@@ -9,7 +9,8 @@
     "activeTab",
     "storage",
     "scripting",
-    "identity"
+    "identity",
+    "contextMenus"
   ],
   "host_permissions": [
     "<all_urls>",

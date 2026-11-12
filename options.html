@@ -4,35 +4,94 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SmartForm Filler - Settings</title>
+  <script src="theme.js"></script>
   <style>
+    /* Colour tokens. Light is the default; dark applies when the OS prefers it (theme
+       "system") or when the user picks Dark. All colours below come from these tokens. */
     :root {
+      color-scheme: light;
+      --bg: #f1f5f9;
+      --surface: #ffffff;
+      --surface-2: #f1f5f9;
+      --surface-hover: #e2e8f0;
+      --border: #e2e8f0;
+      --border-strong: #cbd5e1;
+      --text: #0f172a;
+      --text-muted: #475569;
+      --text-subtle: #64748b;
       --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --on-primary: #ffffff;
+      --primary-soft: #eff6ff;
+      --link: #1d4ed8;
+      --input-bg: #ffffff;
+      --success-bg: #dcfce7; --success-fg: #166534; --success-border: #86efac;
+      --error-bg: #fee2e2;   --error-fg: #991b1b;   --error-border: #fca5a5;
+      --info-bg: #e0f2fe;    --info-fg: #075985;    --info-border: #7dd3fc;
+      --warn-bg: #fef3c7;    --warn-fg: #92400e;    --warn-border: #f59e0b;
+      --rec-fg: #b45309;
+      --rec-top: #fffbeb;
+      --danger: #b91c1c;
+      --shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+      --backdrop: rgba(15, 23, 42, 0.6);
     }
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #0b1120;
+      --surface: #172033;
+      --surface-2: #1e293b;
+      --surface-hover: #273449;
+      --border: #2c3a52;
+      --border-strong: #475569;
+      --text: #e2e8f0;
+      --text-muted: #cbd5e1;
+      --text-subtle: #94a3b8;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --on-primary: #ffffff;
+      --primary-soft: rgba(59, 130, 246, 0.16);
+      --link: #93c5fd;
+      --input-bg: #0f172a;
+      --success-bg: rgba(22, 163, 74, 0.18); --success-fg: #86efac; --success-border: #15803d;
+      --error-bg: rgba(220, 38, 38, 0.18);   --error-fg: #fca5a5;   --error-border: #b91c1c;
+      --info-bg: rgba(14, 165, 233, 0.16);   --info-fg: #7dd3fc;    --info-border: #0369a1;
+      --warn-bg: rgba(245, 158, 11, 0.18);   --warn-fg: #fcd34d;    --warn-border: #b45309;
+      --rec-fg: #fcd34d;
+      --rec-top: rgba(245, 158, 11, 0.12);
+      --danger: #f87171;
+      --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+      --backdrop: rgba(0, 0, 0, 0.7);
+    }
+
     body {
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       max-width: 780px;
       margin: 40px auto;
       padding: 0 20px;
-      background: #f8fafc;
-      color: #0f172a;
+      background: var(--bg);
+      color: var(--text);
       line-height: 1.6;
     }
-    @media (prefers-color-scheme: dark) {
-      body { background: #0f172a; color: #f1f5f9; }
-      .card { background: #1e293b; border-color: #334155; }
-      input, select, textarea, .model-card { background: #0f172a; border-color: #475569; color: #f1f5f9; }
-      .model-card:hover { background: #1e293b; }
+    a { color: var(--link); }
+    h1 { font-size: 28px; margin: 0 0 8px; }
+    .subtitle { color: var(--text-subtle); margin-bottom: 24px; }
+    .page-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      flex-wrap: wrap;
     }
-    h1 { font-size: 28px; margin-bottom: 8px; }
-    .subtitle { color: #64748b; margin-bottom: 24px; }
+    .page-header > div:first-child { flex: 1 1 320px; }
 
     .card {
-      background: white;
-      border: 1px solid #e2e8f0;
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
       border-radius: 12px;
       padding: 24px;
       margin-bottom: 24px;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+      box-shadow: var(--shadow);
     }
 
     .section-header {
@@ -40,8 +99,10 @@
       font-weight: 700;
       margin: 0 0 16px;
       padding-bottom: 8px;
-      border-bottom: 1px solid #e2e8f0;
+      border-bottom: 1px solid var(--border);
     }
+    .divider { border-top: 1px solid var(--border); padding-top: 16px; }
+    .muted { color: var(--text-subtle); }
 
     /* Radio provider selector */
     .provider-option {
@@ -49,18 +110,16 @@
       align-items: center;
       gap: 12px;
       padding: 14px 18px;
-      border: 2px solid #e2e8f0;
+      border: 2px solid var(--border);
       border-radius: 10px;
       margin-bottom: 10px;
       cursor: pointer;
       transition: all 0.1s ease;
     }
-    .provider-option:hover {
-      border-color: #94a3b8;
-    }
+    .provider-option:hover { border-color: var(--border-strong); }
     .provider-option.selected {
       border-color: var(--primary);
-      background: #eff6ff;
+      background: var(--primary-soft);
     }
     .provider-option input[type="radio"] {
       width: 18px;
@@ -70,10 +129,12 @@
     .provider-option .label {
       font-weight: 600;
       font-size: 15px;
+      color: var(--text);
     }
     .provider-option .desc {
       font-size: 13px;
-      color: #64748b;
+      font-weight: 400;
+      color: var(--text-muted);
     }
 
     label {
@@ -81,20 +142,41 @@
       font-weight: 600;
       margin-bottom: 6px;
       font-size: 14px;
+      color: var(--text);
     }
+    input, select, textarea {
+      background: var(--input-bg);
+      color: var(--text);
+      border: 1px solid var(--border-strong);
+      font: inherit;
+    }
+    input::placeholder, textarea::placeholder { color: var(--text-subtle); }
+    input:focus, select:focus, textarea:focus {
+      outline: 2px solid var(--primary);
+      outline-offset: 1px;
+    }
+    input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
     input[type="text"], input[type="url"] {
       width: 100%;
+      box-sizing: border-box;
       padding: 10px 12px;
-      border: 1px solid #cbd5e1;
       border-radius: 8px;
       font-size: 14px;
       margin-bottom: 16px;
     }
+    .select-full {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 8px;
+      margin-bottom: 16px;
+    }
+    table { color: var(--text); }
+    th, td { border-color: var(--border); }
 
     .btn {
-      background: #2563eb;
-      color: white;
-      border: none;
+      background: var(--primary);
+      color: var(--on-primary);
+      border: 1px solid transparent;
       padding: 10px 18px;
       border-radius: 8px;
       font-weight: 600;
@@ -104,15 +186,15 @@
       align-items: center;
       gap: 8px;
     }
-    .btn:hover { background: #1e40af; }
+    .btn:hover { background: var(--primary-hover); }
     .btn-secondary {
-      background: #f1f5f9;
-      color: #334155;
-      border: 1px solid #cbd5e1;
+      background: var(--surface-2);
+      color: var(--text);
+      border: 1px solid var(--border-strong);
     }
-    .btn-success {
-      background: #16a34a;
-    }
+    .btn-secondary:hover { background: var(--surface-hover); }
+    .btn-danger { color: var(--danger); }
+    .btn-success { background: #16a34a; }
     .btn-success:hover { background: #15803d; }
 
     .row {
@@ -130,19 +212,20 @@
       font-size: 13px;
       display: inline-block;
     }
-    .status.success { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
-    .status.error { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
-    .status.info { background: #e0f2fe; color: #0369a1; border: 1px solid #7dd3fc; }
+    .status.success { background: var(--success-bg); color: var(--success-fg); border: 1px solid var(--success-border); }
+    .status.error   { background: var(--error-bg);   color: var(--error-fg);   border: 1px solid var(--error-border); }
+    .status.info    { background: var(--info-bg);    color: var(--info-fg);    border: 1px solid var(--info-border); }
 
     .hint {
       font-size: 12.5px;
-      color: #64748b;
-      margin-top: -8px;
+      color: var(--text-subtle);
+      margin-top: 8px;
       margin-bottom: 16px;
     }
 
     code {
-      background: #f1f5f9;
+      background: var(--surface-2);
+      color: var(--text);
       padding: 2px 6px;
       border-radius: 4px;
       font-family: ui-monospace, monospace;
@@ -150,20 +233,22 @@
 
     /* Model selection modal */
     #modelModal {
-      border: none;
+      border: 1px solid var(--border);
       border-radius: 16px;
       padding: 0;
       max-width: 920px;
       width: 92%;
+      background: var(--surface);
+      color: var(--text);
       box-shadow: 0 25px 50px -12px rgb(0 0 0 / 0.4);
     }
     #modelModal::backdrop {
-      background: rgba(15, 23, 42, 0.6);
+      background: var(--backdrop);
       backdrop-filter: blur(4px);
     }
     .modal-header {
       padding: 20px 24px;
-      border-bottom: 1px solid #e2e8f0;
+      border-bottom: 1px solid var(--border);
       display: flex;
       justify-content: space-between;
       align-items: center;
@@ -183,31 +268,32 @@
       gap: 16px;
     }
     .model-card {
-      border: 1px solid #e2e8f0;
+      border: 1px solid var(--border);
       border-radius: 12px;
       padding: 16px;
       cursor: pointer;
       transition: all 0.1s ease;
-      background: white;
+      background: var(--surface);
+      color: var(--text);
     }
     .model-card:hover {
-      border-color: #2563eb;
-      box-shadow: 0 10px 15px -3px rgb(37 99 235 / 0.1);
+      border-color: var(--primary);
+      box-shadow: 0 10px 15px -3px rgb(37 99 235 / 0.15);
       transform: translateY(-1px);
     }
     .model-card.selected {
-      border-color: #2563eb;
-      background: #eff6ff;
+      border-color: var(--primary);
+      background: var(--primary-soft);
     }
     .model-name {
       font-weight: 700;
       font-size: 15px;
       margin-bottom: 4px;
-      color: #0f172a;
+      color: var(--text);
     }
     .model-desc {
       font-size: 13px;
-      color: #475569;
+      color: var(--text-muted);
       line-height: 1.4;
       margin-bottom: 12px;
       display: -webkit-box;
@@ -219,10 +305,12 @@
       display: flex;
       justify-content: space-between;
       font-size: 12px;
-      color: #64748b;
+      color: var(--text-subtle);
     }
     .model-meta .context {
-      background: #f1f5f9;
+      background: var(--surface-2);
+      color: var(--text-muted);
+      border: 1px solid var(--border);
       padding: 2px 8px;
       border-radius: 999px;
       font-weight: 500;
@@ -248,8 +336,8 @@
     }
     .seg {
       display: inline-flex;
-      background: #f1f5f9;
-      border: 1px solid #cbd5e1;
+      background: var(--surface-2);
+      border: 1px solid var(--border-strong);
       border-radius: 999px;
       padding: 3px;
       gap: 2px;
@@ -257,7 +345,7 @@
     .seg button {
       border: none;
       background: transparent;
-      color: #475569;
+      color: var(--text-muted);
       font-size: 12.5px;
       font-weight: 600;
       padding: 6px 12px;
@@ -266,15 +354,15 @@
       white-space: nowrap;
       transition: all 0.12s ease;
     }
-    .seg button:hover { color: #0f172a; }
+    .seg button:hover { color: var(--text); }
     .seg button.active {
       background: var(--primary);
-      color: #fff;
+      color: var(--on-primary);
       box-shadow: 0 1px 2px rgba(0,0,0,0.15);
     }
     .models-count {
       font-size: 12.5px;
-      color: #64748b;
+      color: var(--text-subtle);
       margin-bottom: 12px;
     }
 
@@ -299,46 +387,32 @@
       border-radius: 999px;
       white-space: nowrap;
     }
-    .badge.star { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
-    .badge.free { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
+    .badge.star { background: var(--warn-bg); color: var(--warn-fg); border: 1px solid var(--warn-border); }
+    .badge.free { background: var(--success-bg); color: var(--success-fg); border: 1px solid var(--success-border); }
     .rec-reason {
       font-size: 12px;
-      color: #b45309;
+      color: var(--rec-fg);
       font-weight: 600;
       margin: 2px 0 10px;
       padding-left: 18px;
     }
     .rec-reason li { line-height: 1.4; }
     .model-card.recommended {
-      border: 2px solid #f59e0b;
+      border: 2px solid var(--warn-border);
       box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.12);
-      background: linear-gradient(180deg, #fffbeb 0%, #ffffff 65%);
+      background: linear-gradient(180deg, var(--rec-top) 0%, var(--surface) 65%);
     }
     .model-card.recommended:hover {
       border-color: #d97706;
       box-shadow: 0 10px 15px -3px rgba(245, 158, 11, 0.25);
     }
     .model-card.recommended.selected {
-      border-color: #2563eb;
-      background: #eff6ff;
-    }
-
-    @media (prefers-color-scheme: dark) {
-      .seg { background: #0f172a; border-color: #475569; }
-      .seg button { color: #94a3b8; }
-      .seg button:hover { color: #f1f5f9; }
-      .model-card.recommended {
-        background: linear-gradient(180deg, rgba(245,158,11,0.14) 0%, #1e293b 65%);
-        border-color: #f59e0b;
-      }
-      .model-card.recommended.selected { background: #1e293b; border-color: #2563eb; }
-      .badge.star { background: rgba(245,158,11,0.2); color: #fcd34d; border-color: #b45309; }
-      .badge.free { background: rgba(22,163,74,0.2); color: #86efac; border-color: #15803d; }
-      .rec-reason { color: #fcd34d; }
+      border-color: var(--primary);
+      background: var(--primary-soft);
     }
 
     .current-model {
-      background: #f1f5f9;
+      background: var(--surface-2);
       padding: 12px 16px;
       border-radius: 8px;
       margin-top: 12px;
@@ -349,17 +423,60 @@
     .current-model-label {
       font-size: 12px;
       font-weight: 600;
-      color: #64748b;
+      color: var(--text-subtle);
       text-transform: uppercase;
       letter-spacing: 0.5px;
       margin-bottom: 8px;
     }
     .current-model-card { max-width: 380px; }
+    .current-model-card .model-card { position: relative; }
+    .current-model-card .model-card:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+    .current-model-card .model-card::after {
+      content: "Change ›";
+      position: absolute;
+      right: 14px;
+      bottom: -26px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--primary);
+      opacity: 0;
+      transition: opacity 0.12s ease;
+    }
+    .current-model-card .model-card:hover::after,
+    .current-model-card .model-card:focus-visible::after { opacity: 1; }
+
+    /* Profiles list + editor (rows are built by the options script) */
+    .profile-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px;
+      margin-bottom: 8px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      gap: 8px;
+    }
+    .form-specific {
+      margin-top: 20px;
+      padding: 15px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
   </style>
 </head>
 <body>
-  <h1>SmartForm Filler Settings</h1>
-  <p class="subtitle">Choose your AI provider and configure models for intelligent form filling.</p>
+  <div class="page-header">
+    <div>
+      <h1>SmartForm Filler Settings</h1>
+      <p class="subtitle">Choose your AI provider and configure models for intelligent form filling.</p>
+    </div>
+    <div class="seg" id="segTheme" role="group" aria-label="Colour theme">
+      <button type="button" data-theme-choice="system">System</button>
+      <button type="button" data-theme-choice="light">☀ Light</button>
+      <button type="button" data-theme-choice="dark">☾ Dark</button>
+    </div>
+  </div>
 
   <!-- Provider Selection -->
   <div class="card">
@@ -413,26 +530,14 @@
       <button id="btnConnectOpenRouter" class="btn">
         🔐 Authenticate with OpenRouter (OAuth2 PKCE)
       </button>
-      <button id="btnBrowseModels" class="btn btn-secondary">
-        📋 Browse &amp; Select Model
-      </button>
     </div>
 
-    <!-- Currently selected model, shown as a card right at the Browse button -->
-    <div id="currentOpenRouterModel" style="margin-bottom: 16px;">
+    <!-- Currently selected model; clicking the card opens the model picker -->
+    <div id="currentOpenRouterModel">
       <div class="current-model-label">Selected model</div>
       <div id="currentModelCard" class="current-model-card">qwen/qwen3-coder</div>
+      <p class="hint" id="currentModelHelp">Click the model card to browse and choose a different model.</p>
     </div>
-
-    <div style="margin-bottom: 16px;">
-      <label for="openrouterApiKey">API Key (fallback / manual paste)</label>
-      <div class="row">
-        <input type="text" id="openrouterApiKey" placeholder="sk-or-..." style="margin-bottom: 0;">
-        <button id="btnSaveOpenRouterKey" class="btn btn-secondary" style="white-space: nowrap;">Save Key</button>
-      </div>
-      <p class="hint">You can also create keys manually at <a href="https://openrouter.ai/keys" target="_blank">openrouter.ai/keys</a></p>
-    </div>
-
   </div>
 
   <!-- Behavior -->
@@ -440,7 +545,7 @@
     <div class="section-header">⚙️ General Behavior</div>
 
     <label for="defaultProfile">Default Profile for Quick Fill</label>
-    <select id="defaultProfile" style="width: 100%; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 8px; margin-bottom: 16px;">
+    <select id="defaultProfile" class="select-full">
       <option value="au-personal">AU Personal (Mansfield/Brisbane)</option>
       <option value="au-business">AU Business / Company</option>
       <option value="us-test">US Test User</option>
@@ -464,17 +569,17 @@
       </ul>
     </div>
 
-    <div style="border-top: 1px solid #e2e8f0; padding-top: 16px;">
+    <div class="divider">
       <h3 style="font-size: 15px; margin: 0 0 16px; font-weight: 600;">Editor</h3>
       <div id="profileEditor" style="display: none;">
       </div>
-      <div id="noProfileSelected" style="color: #64748b; text-align: center; padding: 20px;">
+      <div id="noProfileSelected" class="muted" style="text-align: center; padding: 20px;">
         Select a profile to edit
       </div>
     </div>
 
     <!-- Form-specific profile editor (shown when profile has formMetadata) -->
-    <div id="formSpecificProfileSection" style="display: none; margin-top: 20px; padding: 15px; border: 1px solid #ccc; border-radius: 4px;">
+    <div id="formSpecificProfileSection" class="form-specific" style="display: none;">
       <h3 style="margin-top: 0;">Form-Specific Profile: <span id="formProfileLabel"></span></h3>
       <p style="margin-bottom: 16px;">
         <strong>Form URL:</strong> <code id="formProfileUrl"></code><br/>
@@ -484,7 +589,7 @@
       <h4>Fields</h4>
       <table id="formFieldsTable" style="width: 100%; border-collapse: collapse;">
         <thead>
-          <tr style="border-bottom: 1px solid #ccc;">
+          <tr style="border-bottom: 1px solid var(--border);">
             <th style="padding: 8px; text-align: left;">Field Name</th>
             <th style="padding: 8px; text-align: left;">HTML Type</th>
             <th style="padding: 8px; text-align: left;">Mode</th>
@@ -496,13 +601,13 @@
 
       <div style="margin-top: 15px; display: flex; gap: 8px;">
         <button id="addFieldBtn" class="btn btn-secondary" onclick="window.addFieldToFormProfile()">Add Field</button>
-        <button id="deleteFormProfileBtn" class="btn btn-secondary" style="color: #991b1b;" onclick="window.deleteFormProfile()">Delete Profile</button>
+        <button id="deleteFormProfileBtn" class="btn btn-secondary btn-danger" onclick="window.deleteFormProfile()">Delete Profile</button>
         <button id="saveFormProfileBtn" class="btn" onclick="window.saveFormProfile()">Save</button>
       </div>
     </div>
   </div>
 
-  <p style="text-align:center; color:#64748b; font-size:12px; margin-top: 32px;">
+  <p class="muted" style="text-align:center; font-size:12px; margin-top: 32px;">
     SmartForm Filler v0.9.1 • Supports both local Ollama and OpenRouter
   </p>
 
@@ -513,7 +618,7 @@
       <button id="btnCloseModal" class="btn btn-secondary" style="padding: 6px 14px;">Close</button>
     </div>
     <div class="modal-body">
-      <div id="modelsLoading" style="text-align:center; padding: 40px 0; color:#64748b;">
+      <div id="modelsLoading" class="muted" style="text-align:center; padding: 40px 0;">
         Loading available models from OpenRouter...
       </div>
 

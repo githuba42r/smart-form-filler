@@ -60,6 +60,9 @@
     let sibling = el.previousElementSibling;
     let attempts = 0;
     while (sibling && attempts < 4) {
+      // A label that precedes another control (or is bound to one) belongs to that control.
+      if (/^(input|select|textarea)$/i.test(sibling.tagName)) break;
+      if (sibling.tagName === 'LABEL' && sibling.htmlFor && sibling.htmlFor !== el.id) break;
       const txt = sibling.textContent.trim();
       if (txt.length > 2 && txt.length < 120 && !/^(input|select|button|textarea)$/i.test(sibling.tagName)) {
         // Heuristic: looks like a label if short and not another control
@@ -88,6 +91,135 @@
   }
 
   /**
+   * Label of the group a control sits in (<fieldset> legend or role="group" label) —
+   * the only context split controls such as Day / Month / Year selects carry.
+   */
+  function getGroupLabel(el) {
+    const fieldset = el.closest && el.closest('fieldset');
+    const legend = fieldset && fieldset.querySelector('legend');
+    if (legend && legend.textContent.trim()) return legend.textContent.trim();
+    const group = el.closest && el.closest('[role="group"], [role="radiogroup"]');
+    if (group) {
+      const aria = group.getAttribute('aria-label');
+      if (aria && aria.trim()) return aria.trim();
+      const by = group.getAttribute('aria-labelledby');
+      const byEl = by && document.getElementById(by.split(' ')[0]);
+      if (byEl && byEl.textContent.trim()) return byEl.textContent.trim();
+    }
+    return '';
+  }
+
+  // Visible, selectable option texts of a <select> (placeholders like "Select…" dropped).
+  function selectOptionTexts(el) {
+    if (!el || el.tagName.toLowerCase() !== 'select') return [];
+    return Array.from(el.options)
+      .filter(o => !o.disabled && o.value !== '' && !/^(select|choose|please|--|none|—)\b/i.test(o.textContent.trim()))
+      .map(o => o.textContent.trim());
+  }
+
+  /**
+   * Everything the page says about a control: label, name, placeholder, group context,
+   * options and constraints. Feeds both the heuristics and the AI value choice.
+   */
+  function describeControl(el) {
+    const d = {
+      name: el.name || el.id || '',
+      type: el.type || el.tagName.toLowerCase(),
+      label: getBestLabel(el),
+      ariaLabel: (el.getAttribute && el.getAttribute('aria-label')) || '',
+      placeholder: el.placeholder || '',
+      context: getGroupLabel(el)
+    };
+    const options = selectOptionTexts(el);
+    if (options.length) d.options = options.slice(0, 40);
+    if (el.maxLength > 0) d.maxLength = el.maxLength;
+    ['min', 'max', 'pattern'].forEach(a => { const v = el.getAttribute && el.getAttribute(a); if (v) d[a] = v; });
+    if (el.required) d.required = true;
+    return d;
+  }
+
+  // Birth-date signals; run on spacedText() so "dob_day" / "birthMonth" match too.
+  const BIRTH_RE = /\bdob\b|\bbirth|\bbday\b|\bd\.o\.b\b/;
+  function spacedText(str) {
+    return String(str || '').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_\-\[\]]+/g, ' ').toLowerCase();
+  }
+  function isBirthField(field) {
+    return BIRTH_RE.test(spacedText(`${field.label} ${field.name} ${field.placeholder} ${field.context || ''}`));
+  }
+
+  /**
+   * Which part of a date a control holds: 'day' | 'month' | 'year' | 'full'.
+   * Selects are judged by their options; text inputs by their wording.
+   */
+  function datePartFor(el, field) {
+    const type = (el.type || '').toLowerCase();
+    if (type === 'date' || type === 'datetime-local' || type === 'month') return 'full';
+    if (el.tagName.toLowerCase() === 'select') {
+      const opts = selectOptionTexts(el);
+      const months = window.SFFormData.MONTH_NAMES.map(m => m.slice(0, 3).toLowerCase());
+      if (opts.some(t => months.indexOf(t.slice(0, 3).toLowerCase()) !== -1)) return 'month';
+      const nums = opts.map(t => parseInt(t, 10)).filter(n => !isNaN(n));
+      if (nums.length && nums.every(n => n >= 1000)) return 'year';
+      if (nums.length >= 28 && Math.max(...nums) <= 31) return 'day';
+      if (nums.length === 12 && Math.max(...nums) === 12) return 'month';
+    }
+    const text = spacedText(`${field.label} ${field.name} ${field.placeholder}`)
+      .replace(/date of birth|birth ?(day|date)/g, ' ');
+    const parts = [];
+    if (/\b(day|dd)\b/.test(text)) parts.push('day');
+    if (/\b(month|mm)\b/.test(text)) parts.push('month');
+    if (/\b(year|yyyy|yy)\b/.test(text)) parts.push('year');
+    return parts.length === 1 ? parts[0] : 'full';
+  }
+
+  /**
+   * Format token for a full-date text input, e.g. 'DD/MM/YYYY', from its placeholder,
+   * label or pattern; otherwise the profile country's convention.
+   */
+  function dateFormatFor(el, field, country) {
+    const type = (el.type || '').toLowerCase();
+    if (type === 'date') return 'YYYY-MM-DD';
+    if (type === 'datetime-local') return 'YYYY-MM-DDT09:00';
+    if (type === 'month') return 'YYYY-MM';
+    const hint = `${field.placeholder} ${field.label} ${el.getAttribute('data-format') || ''}`;
+    const m = /\b(dd?|mm?|yy(?:yy)?)([\/\-. ])(dd?|mm?)\2(yy(?:yy)?|dd?)\b/i.exec(hint);
+    if (m) return m[0].toUpperCase();
+    return country === 'US' ? 'MM/DD/YYYY' : 'DD/MM/YYYY';
+  }
+
+  /**
+   * Render an ISO date for a specific control: the right part (day / month / year) and
+   * format, or for a <select> the value of the matching option. Non-ISO values pass through.
+   */
+  function adaptDateValue(el, field, value, country) {
+    const F = window.SFFormData;
+    const d = F.parseISODate(value);
+    if (!d) return value;
+    const part = datePartFor(el, field);
+    if (el.tagName.toLowerCase() === 'select') {
+      const num = part === 'day' ? d.day : part === 'month' ? d.month : d.year;
+      const name = part === 'month' ? F.MONTH_NAMES[d.month - 1].toLowerCase() : '';
+      const real = Array.from(el.options).filter(o => o.value !== '' && !o.disabled);
+      const hit = real.find(o => {
+        const t = o.textContent.trim().toLowerCase(), v = String(o.value).toLowerCase();
+        if (parseInt(v, 10) === num || parseInt(t, 10) === num) return true;
+        return !!name && (t === name || t === name.slice(0, 3) || v === name || v === name.slice(0, 3));
+      });
+      if (hit) return hit.value;
+      // Year list that doesn't reach the generated year: take the closest one.
+      const numeric = real.filter(o => !isNaN(parseInt(o.textContent, 10)));
+      if (!numeric.length) return value;
+      return numeric.reduce((best, o) =>
+        Math.abs(parseInt(o.textContent, 10) - num) < Math.abs(parseInt(best.textContent, 10) - num) ? o : best
+      ).value;
+    }
+    if (part === 'day') return F.formatDate(value, 'DD');
+    if (part === 'month') return F.formatDate(value, 'MM');
+    if (part === 'year') return F.formatDate(value, el.maxLength === 2 ? 'YY' : 'YYYY');
+    return F.formatDate(value, dateFormatFor(el, field, country));
+  }
+
+  /**
    * Classify a field into a semantic category for heuristic matching.
    */
   function getFieldCategory(field) {
@@ -98,7 +230,8 @@
     if (type === 'email' || /\bemail\b|\be-mail\b/.test(text)) return 'email';
     if (type === 'tel' || /\bphone\b|\bmobile\b|\btel\b|\bcontact.?number\b/.test(text)) return 'phone';
     if (/\bpassword\b|\bpwd\b|\bpass(word)?\b/.test(text)) return 'password';
-    if (type === 'date' || /\bdob\b|\bdate.?of.?birth\b|\bbirthday\b/.test(text)) return 'dob';
+    if (isBirthField(field)) return 'dob';
+    if (type === 'date') return 'date'; // a date, but not a birth date — don't fill it with a DOB
 
     if (/\bfirst.?name\b|\bgiven.?name\b|\bfname\b/.test(text)) return 'firstName';
     if (/\blast.?name\b|\bsurname\b|\blname\b|\bfamily.?name\b/.test(text)) return 'lastName';
@@ -152,11 +285,9 @@
       } else if (inputType === 'checkbox' || inputType === 'radio') {
         const shouldCheck = ['true', '1', 'yes', 'on', 'checked'].includes(String(value).toLowerCase());
         el.checked = shouldCheck;
-      } else if (inputType === 'date' || inputType === 'datetime-local' || inputType === 'month') {
-        // Assume value is already in correct format or try to normalize simple cases
-        el.value = value;
       } else {
-        el.value = value;
+        // Native setter, so React/Vue value-trackers register the change.
+        setInputValue(el, value);
       }
 
       // Critical: dispatch events so frameworks pick up the change
@@ -356,6 +487,7 @@
         name: el.name || el.id || '',
         type: el.type || el.tagName.toLowerCase(),
         placeholder: el.placeholder || '',
+        context: getGroupLabel(el),
         formIndex: 0,
         fieldIndex: idx
       });
@@ -662,8 +794,9 @@
           // Don't overwrite a field the user/form already populated (idempotent re-passes).
           if (handled.has(el) && !isEmptyValue(el)) { continue; }
 
-          const value = values[category];
+          let value = values[category];
           if (value === null || value === undefined) continue;
+          if (category === 'dob') value = adaptDateValue(el, field, value, profile.country);
 
           const isAuto = isAutocompleteInput(el);
 
@@ -813,9 +946,10 @@
         }
         if (fieldConfig.mode === 'pinned')    return fieldConfig.value;
         if (fieldConfig.mode === 'generated') {
-          return window.SFAIDetector
+          const generated = window.SFAIDetector
             ? await window.SFAIDetector.generateCustomFieldValue(field)
             : undefined;
+          return generated === '' ? undefined : generated;
         }
         return undefined; // empty | excluded | unknown mode → skip
       }
@@ -831,35 +965,35 @@
       }
     }
 
-    // ── Custom / unknown field → AI generation ──────────────────────────────
+    // ── Custom / unknown field → AI picks a value from label, name, options… ─
+    // Checkboxes/radios are left alone: there is no meaningful "value" to invent.
+    const htmlType = (field.htmlType || field.type || '').toLowerCase();
+    if (htmlType === 'checkbox' || htmlType === 'radio') return undefined;
     if (window.SFAIDetector) {
-      return await window.SFAIDetector.generateCustomFieldValue(field);
+      const generated = await window.SFAIDetector.generateCustomFieldValue(field);
+      return generated === '' ? undefined : generated; // nothing appropriate → leave blank
     }
     return undefined;
   }
 
   /**
-   * Apply a { htmlName: value } map to DOM elements.
-   * Used by the AI-powered fill path; simpler than the multi-pass heuristic fill.
+   * Write resolved values to their controls. Used by the AI-powered fill path.
+   * Date types (dob / date) are rendered per control: part, format or matching option.
    *
-   * @param {object} valuesToFill
+   * @param {Array<{el, value, detectedType}>} entries
+   * @param {string} [country] Profile country (default date order for text inputs)
    * @returns {number} Number of fields successfully filled
    */
-  async function fillFormWithValues(valuesToFill) {
+  function fillFormWithValues(entries, country) {
     let filledCount = 0;
-    const keys = Object.keys(valuesToFill || {});
-    for (let i = 0; i < keys.length; i++) {
-      const htmlName = keys[i];
-      const value    = valuesToFill[htmlName];
-      if (value === undefined || value === null) continue;
-      let el = null;
-      try {
-        el = document.querySelector('[name="' + htmlName.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"]')
-          || document.getElementById(htmlName);
-      } catch (_) {}
-      if (!el) continue;
-      if (applyValueToElement(el, value)) filledCount++;
-    }
+    entries.forEach(function (entry) {
+      const el = entry.el;
+      if (!el || !el.isConnected || entry.value === undefined || entry.value === null) return;
+      const finalValue = (entry.detectedType === 'dob' || entry.detectedType === 'date')
+        ? adaptDateValue(el, describeControl(el), entry.value, country)
+        : entry.value;
+      if (applyValueToElement(el, finalValue)) filledCount++;
+    });
     return filledCount;
   }
 
@@ -872,21 +1006,20 @@
     const allControls = Array.from(document.querySelectorAll(
       'input:not([type="hidden"]):not([type="submit"]):not([type="button"])' +
       ':not([type="reset"]):not([type="image"]), select, textarea'
-    )).filter(function (el) { return !!(el.name || el.id); });
+    ));
 
     if (!allControls.length) {
       return { success: false, message: 'No fillable fields detected on page.' };
     }
 
-    const fieldsForAI = allControls.map(function (el) {
-      return {
-        name:        el.name || el.id || '',
-        type:        el.type || el.tagName.toLowerCase(),
-        label:       getBestLabel(el),
-        ariaLabel:   (el.getAttribute && el.getAttribute('aria-label')) || '',
-        placeholder: el.placeholder || ''
-      };
+    // Controls without name/id get a positional name so the LLM can still refer to them.
+    const fieldsForAI = allControls.map(function (el, i) {
+      const d = describeControl(el);
+      if (!d.name) d.name = 'field_' + i;
+      return d;
     });
+    const indexByName = {};
+    fieldsForAI.forEach(function (d, i) { if (!(d.name in indexByName)) indexByName[d.name] = i; });
 
     // AI classification (may return a cached result)
     const aiResult = await window.SFAIDetector.detectFormFields({
@@ -904,16 +1037,32 @@
     // Pre-resolve standard values (policy + transient only-filter already applied)
     const standardValues = F.resolveValues(activeProfile, (opts && opts.only) || null);
 
-    // Resolve value for each AI-detected field
-    const valuesToFill = {};
+    // Resolve value for each AI-detected field. The page's own description (options,
+    // constraints, group context) is merged in so value generation can use it.
+    const entries = [];
+    const seen    = new Set();
     for (let i = 0; i < aiResult.fields.length; i++) {
-      const aiField = aiResult.fields[i];
-      const value   = await resolveFieldValue(aiField, activeProfile, opts, standardValues);
-      const key     = aiField.htmlName || aiField.name || '';
-      if (key && value !== undefined) valuesToFill[key] = value;
+      const detected = aiResult.fields[i];
+      const key      = detected.htmlName || detected.name || '';
+      // Match by name; if the LLM mangled it, fall back to position (the prompt asks for same order).
+      const idx = (key in indexByName) ? indexByName[key] : (i < allControls.length ? i : -1);
+      if (idx === -1 || seen.has(idx)) continue;
+      seen.add(idx);
+      const dom      = fieldsForAI[idx];
+      const aiField  = Object.assign({}, dom, detected, {
+        htmlType: detected.htmlType || dom.type,
+        label:    detected.label || dom.label,
+        llmUnavailable: !!aiResult.error
+      });
+      // The LLM sometimes misses split DOB parts (Day / Month / Year); the page's wording wins.
+      if (aiField.detectedType !== 'dob' && isBirthField(dom)) aiField.detectedType = 'dob';
+      aiField.htmlName = dom.name;
+      const value = await resolveFieldValue(aiField, activeProfile, opts, standardValues);
+      dbg('ai field', dom.name, JSON.stringify(dom.label), '→', aiField.detectedType, '=', JSON.stringify(value));
+      if (value !== undefined) entries.push({ el: allControls[idx], value: value, detectedType: aiField.detectedType });
     }
 
-    const filledCount = await fillFormWithValues(valuesToFill);
+    const filledCount = fillFormWithValues(entries, activeProfile.country);
     return {
       success:     true,
       filledCount,
@@ -922,6 +1071,44 @@
     };
   }
 
+
+  // ============================================================
+  // Right-click → "Fill this field with AI suggestion"
+  // ============================================================
+  let lastContextTarget = null;
+  document.addEventListener('contextmenu', function (e) {
+    const t = e.target;
+    lastContextTarget = (t && t.matches && t.matches(FILLABLE_SELECTOR)) ? t
+      : (t && t.closest ? t.closest(FILLABLE_SELECTOR) : null);
+  }, true);
+
+  /**
+   * Ask the AI for a value for one control, chosen from its label, name, placeholder,
+   * group context and options, and write it. Profile data is not used.
+   */
+  async function aiSuggestField(el) {
+    el = el || lastContextTarget || (document.activeElement && document.activeElement.matches &&
+      document.activeElement.matches(FILLABLE_SELECTOR) ? document.activeElement : null);
+    if (!el || !el.isConnected) return { success: false, message: 'No form field selected.' };
+    if (!window.SFAIDetector || !window.SFAIDetector.suggestFieldValue) {
+      return { success: false, message: 'AI detector not loaded.' };
+    }
+    const d = describeControl(el);
+    showToast('Asking AI for “' + d.label + '”…');
+    const res = await window.SFAIDetector.suggestFieldValue(Object.assign({}, d, {
+      htmlName: d.name, htmlType: d.type, currentValue: el.value || ''
+    }));
+    if (res.error) {
+      showToast('AI suggestion failed: ' + res.error);
+      return { success: false, message: res.error };
+    }
+    const isDate = isBirthField(d) || /^(date|datetime-local|month)$/.test((el.type || '').toLowerCase());
+    const value = isDate ? adaptDateValue(el, d, res.value, (await loadProfile(null)).country) : res.value;
+    const ok = applyValueToElement(el, value);
+    showToast(ok ? 'AI filled “' + d.label + '”' : 'Could not fill “' + d.label + '”');
+    return { success: ok, value: value };
+  }
+  window.__sfAISuggestField = aiSuggestField;
 
   // ============================================================
   // Per-form scan icons — let the user target a specific form/modal
@@ -1221,6 +1408,11 @@
 
     if (msg.action === 'fillProfile') {
       fillWithProfile(msg.profileKey || 'au-personal', msg.opts || {}).then(sendResponse);
+      return true; // async response
+    }
+
+    if (msg.action === 'aiSuggestField') {
+      aiSuggestField().then(sendResponse);
       return true; // async response
     }
 

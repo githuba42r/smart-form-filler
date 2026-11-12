@@ -21,9 +21,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   // OpenRouter elements
   const openrouterStatus = document.getElementById('openrouterStatus');
   const btnConnectOpenRouter = document.getElementById('btnConnectOpenRouter');
-  const btnBrowseModels = document.getElementById('btnBrowseModels');
-  const openrouterApiKeyInput = document.getElementById('openrouterApiKey');
-  const btnSaveOpenRouterKey = document.getElementById('btnSaveOpenRouterKey');
   const currentOpenRouterModel = document.getElementById('currentOpenRouterModel');
   const currentModelCard = document.getElementById('currentModelCard');
 
@@ -55,7 +52,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Fetch the public OpenRouter model list (no API key required), cached per session.
   async function fetchOpenRouterModels() {
     if (modelsCache) return modelsCache;
-    const apiKey = (openrouterApiKeyInput && openrouterApiKeyInput.value.trim()) || currentSettings.openrouterApiKey;
+    const apiKey = currentSettings.openrouterApiKey;
     const headers = {
       'HTTP-Referer': 'https://smartform-filler.dev',
       'X-Title': 'SmartForm Filler Extension'
@@ -129,7 +126,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // OpenRouter
     if (currentSettings.openrouterApiKey) {
-      openrouterApiKeyInput.value = currentSettings.openrouterApiKey;
       updateOpenRouterStatus(true);
     } else {
       updateOpenRouterStatus(false);
@@ -229,7 +225,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       openrouterStatus.textContent = `✅ Connected to OpenRouter ${message ? '• ' + message : ''}`;
       openrouterStatus.className = 'status success';
     } else {
-      openrouterStatus.textContent = '⚠️ Not connected — please authenticate or paste an API key';
+      openrouterStatus.textContent = '⚠️ Not connected — authenticate with OpenRouter to continue';
       openrouterStatus.className = 'status info';
     }
     openrouterStatus.style.display = 'block';
@@ -249,7 +245,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     return { ...m, _reasons: reasons, _free: free };
   }
 
-  // Render the currently selected model as a full card under the Browse button.
+  // Render the currently selected model as a full card; clicking it opens the picker.
   function showCurrentOpenRouterModel(modelId) {
     if (!currentOpenRouterModel || !currentModelCard) return;
     // Always show a model — fall back to the default. Guarded so a load issue
@@ -273,8 +269,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!currentModelCard) return;
     currentModelCard.innerHTML = '';
     const card = createModelCard(model, { selected: true });
-    card.title = 'Click to change model';
-    card.addEventListener('click', () => { if (btnBrowseModels) btnBrowseModels.click(); });
+    card.title = 'Click to choose a different model';
+    card.setAttribute('role', 'button');
+    card.setAttribute('tabindex', '0');
+    card.setAttribute('aria-describedby', 'currentModelHelp');
+    card.addEventListener('click', openModelPicker);
+    card.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openModelPicker(); }
+    });
     currentModelCard.appendChild(card);
   }
 
@@ -343,16 +345,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       await chrome.storage.local.set({ openrouterApiKey: key, provider: 'openrouter' });
       currentSettings.openrouterApiKey = key;
-      openrouterApiKeyInput.value = key;
       updateOpenRouterStatus(true, 'Authenticated via OAuth');
 
       const r = document.getElementById('provider-openrouter');
       if (r) { r.checked = true; r.dispatchEvent(new Event('change')); }
     } catch (err) {
       console.error(err);
-      openrouterStatus.textContent = `OAuth flow failed: ${err.message}. You can paste an API key manually below.`;
+      openrouterStatus.textContent = `OAuth flow failed: ${err.message}. Please try authenticating again.`;
       openrouterStatus.className = 'status error';
-      chrome.tabs.create({ url: 'https://openrouter.ai/keys' });
     }
   });
 
@@ -370,16 +370,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
 
-  if (btnSaveOpenRouterKey) btnSaveOpenRouterKey.addEventListener('click', async () => {
-    const key = openrouterApiKeyInput.value.trim();
-    if (!key) { alert('Please enter an API key'); return; }
-    await chrome.storage.local.set({ openrouterApiKey: key, provider: 'openrouter' });
-    updateOpenRouterStatus(true, 'Key saved');
-    const r = document.getElementById('provider-openrouter');
-    if (r) { r.checked = true; r.dispatchEvent(new Event('change')); }
-  });
-
-  if (btnBrowseModels) btnBrowseModels.addEventListener('click', async () => {
+  // Open the model picker (triggered by clicking the selected-model card).
+  async function openModelPicker() {
     // The models list endpoint is public — no API key required to browse it.
     if (!modelModal) return;
 
@@ -452,7 +444,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         modelsError.textContent = `Failed to load models: ${err.message}`;
       }
     }
-  });
+  }
 
   // Highlight which segmented button is active for a given filter value.
   function activateSeg(seg, value) {
@@ -576,7 +568,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     profiles.forEach(profile => {
       const li = document.createElement('li');
-      li.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding: 12px; margin-bottom: 8px; background: #f1f5f9; border-radius: 8px; gap: 8px;';
+      li.className = 'profile-row';
 
       const nameBtn = document.createElement('button');
       nameBtn.textContent = profile.label || profile.id;
@@ -614,7 +606,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       deleteBtn.textContent = 'Delete';
       deleteBtn.className = 'btn btn-secondary';
       deleteBtn.style.fontSize = '12px';
-      deleteBtn.style.color = '#991b1b';
+      deleteBtn.style.color = 'var(--danger)';
       deleteBtn.addEventListener('click', async () => {
         if (confirm(`Delete "${profile.label || profile.id}"?`)) {
           profiles = SFFormData.profilesDelete(profiles, profile.id);
@@ -654,7 +646,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const input = document.createElement('input');
       input.type = 'text';
       input.value = field.value || '';
-      input.style.cssText = 'padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 4px; width: 150px;';
+      input.style.cssText = 'padding: 4px 8px; border: 1px solid var(--border-strong); border-radius: 4px; width: 150px;';
       input.addEventListener('change', function () {
         window.updateFieldValue(profile.id, idx, input.value);
       });
@@ -702,7 +694,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const fields = profile.fields || [];
     fields.forEach(function (field, idx) {
       const tr = document.createElement('tr');
-      tr.style.borderBottom = '1px solid #eee';
+      tr.style.borderBottom = '1px solid var(--border)';
 
       // Field Name
       const tdName = document.createElement('td');
@@ -774,7 +766,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Return a preview sample for a detected field type using SFFormData.
   window.previewGeneratedValue = function (detectedType) {
     if (typeof SFFormData !== 'undefined' && SFFormData.generateCustomFieldValue) {
-      return SFFormData.generateCustomFieldValue(detectedType);
+      return SFFormData.generateCustomFieldValue(detectedType) || '(chosen by AI at fill time)';
     }
     return '';
   };
@@ -846,7 +838,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     countryLabel.textContent = 'Country';
     countryLabel.style.display = 'block';
     const countrySelect = document.createElement('select');
-    countrySelect.style.cssText = 'width: 100%; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 8px; margin-bottom: 0;';
+    countrySelect.style.cssText = 'width: 100%; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 8px; margin-bottom: 0;';
 
     if (typeof SFAddress !== 'undefined') {
       const countries = SFAddress.listCountries();
@@ -938,7 +930,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       Array.from(addrContainer.querySelectorAll('[data-field]')).forEach(input => {
         const fieldKey = input.getAttribute('data-field');
         const wrap = input.parentElement;
-        wrap.style.cssText = 'margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid #e2e8f0;';
+        wrap.style.cssText = 'margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border);';
 
         // Exclude checkbox
         const excludeWrap = document.createElement('div');
@@ -974,7 +966,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         pinInput.type = 'text';
         pinInput.id = `pin-${fieldKey}`;
         pinInput.value = pins[fieldKey] || '';
-        pinInput.style.cssText = 'flex: 1; padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 13px; margin-bottom: 0;';
+        pinInput.style.cssText = 'flex: 1; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: 4px; font-size: 13px; margin-bottom: 0;';
         pinInput.addEventListener('change', async () => {
           const newPins = { ...pins, [fieldKey]: pinInput.value };
           profiles = SFFormData.profilePatch(profiles, id, { pins: newPins });
@@ -1056,7 +1048,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         var safeVal = (field.value || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;');
         actionHtml = '<input type="text" value="' + safeVal + '" ' +
           'onchange="window.updateFieldValue(\'' + fId + '\',\'' + fName + '\',this.value)" ' +
-          'style="padding:4px 8px;border:1px solid #cbd5e1;border-radius:4px;width:150px;" />';
+          'style="padding:4px 8px;border:1px solid var(--border-strong);border-radius:4px;width:150px;" />';
       } else if (field.mode === 'generated') {
         var dt = (field.detectedType || field.htmlName || '').replace(/'/g, "\\'");
         actionHtml = '<button onclick="window.previewGeneratedValue(\'' + dt + '\')">Preview</button>';
@@ -1064,7 +1056,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         actionHtml = '—';
       }
 
-      return '<tr style="border-bottom:1px solid #eee;">' +
+      return '<tr style="border-bottom:1px solid var(--border);">' +
         '<td style="padding:8px;">' + (field.htmlName || '') + '</td>' +
         '<td style="padding:8px;">' + (field.htmlType  || '') + '</td>' +
         '<td style="padding:8px;">' +
@@ -1093,7 +1085,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       metaHtml +
       '<h4 style="font-size:13px;font-weight:600;margin:0 0 8px;">Fields</h4>' +
       '<table id="formFieldsTable" style="width:100%;border-collapse:collapse;">' +
-        '<thead><tr style="border-bottom:1px solid #ccc;">' +
+        '<thead><tr style="border-bottom:1px solid var(--border);">' +
           '<th style="padding:8px;text-align:left;">Field Name</th>' +
           '<th style="padding:8px;text-align:left;">HTML Type</th>' +
           '<th style="padding:8px;text-align:left;">Mode</th>' +
@@ -1103,10 +1095,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       '</table>' +
       '<div style="margin-top:15px;">' +
         '<button onclick="window.deleteFormProfile()" ' +
-          'style="background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;padding:6px 12px;border-radius:6px;cursor:pointer;margin-right:8px;">' +
+          'style="background:var(--error-bg);color:var(--error-fg);border:1px solid var(--error-border);padding:6px 12px;border-radius:6px;cursor:pointer;margin-right:8px;">' +
           'Delete Profile</button>' +
         '<button onclick="window.saveFormProfile()" ' +
-          'style="background:#2563eb;color:white;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;">' +
+          'style="background:var(--primary);color:var(--on-primary);border:none;padding:6px 12px;border-radius:6px;cursor:pointer;">' +
           'Save</button>' +
       '</div>';
 

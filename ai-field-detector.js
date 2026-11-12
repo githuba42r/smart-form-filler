@@ -3,8 +3,10 @@
 ;(function (root) {
   'use strict';
 
-  var CACHE_KEY = 'fieldDetectionCache';
+  // Bump the version when detection output changes so stale cached classifications are dropped.
+  var CACHE_KEY = 'fieldDetectionCache.v2';
   var CACHE_EXPIRY_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+  try { root.localStorage.removeItem('fieldDetectionCache'); } catch (e) { /* pre-v2 cache */ }
 
   // ---------------------------------------------------------------------------
   // Form signature — deterministic hash of sorted field names + types.
@@ -23,6 +25,45 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Canonical types + aliases the LLM tends to return instead.
+  // ---------------------------------------------------------------------------
+  var CANONICAL_TYPES = ['firstname', 'lastname', 'fullname', 'username', 'email', 'phone',
+    'street1', 'street2', 'city', 'state', 'zip', 'country', 'password', 'dob', 'business',
+    'genericText'];
+  var TYPE_ALIASES = {
+    first_name: 'firstname', given_name: 'firstname', fname: 'firstname',
+    last_name: 'lastname', surname: 'lastname', family_name: 'lastname', lname: 'lastname',
+    name: 'fullname', full_name: 'fullname', user_name: 'username', login: 'username',
+    e_mail: 'email', email_address: 'email',
+    mobile: 'phone', telephone: 'phone', tel: 'phone', phone_number: 'phone', mobile_number: 'phone',
+    address: 'street1', street: 'street1', address1: 'street1', address_line_1: 'street1', street_address: 'street1',
+    address2: 'street2', address_line_2: 'street2', apartment: 'street2', unit: 'street2',
+    suburb: 'city', town: 'city', province: 'state', region: 'state', territory: 'state',
+    postcode: 'zip', post_code: 'zip', postal_code: 'zip', zipcode: 'zip', zip_code: 'zip',
+    birthday: 'dob', birthdate: 'dob', birth_date: 'dob', date_of_birth: 'dob',
+    company: 'business', company_name: 'business', organisation: 'business', organization: 'business',
+    generictext: 'genericText'
+  };
+  function _normalizeType(type) {
+    var key = String(type || '').trim().toLowerCase().replace(/[\s\-]+/g, '_');
+    if (!key) return 'custom';
+    if (TYPE_ALIASES[key]) return TYPE_ALIASES[key];
+    var canonical = CANONICAL_TYPES.find(function (t) { return t.toLowerCase() === key; });
+    return canonical || key;
+  }
+  function _normalizeDetections(fields) {
+    return fields.map(function (f) {
+      return Object.assign({}, f, { detectedType: _normalizeType(f && f.detectedType) });
+    });
+  }
+
+  // Birth-date signals. Run on _spaced() text so "dob_day" and "birthMonth" match.
+  var BIRTH_RE = /\bdob\b|\bbirth|\bbday\b|\bd\.o\.b\b/;
+  function _spaced(str) {
+    return String(str || '').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_\-\[\]]+/g, ' ').toLowerCase();
+  }
+
+  // ---------------------------------------------------------------------------
   // Heuristic fallback — regex on field names/labels/types.
   // ---------------------------------------------------------------------------
   function _heuristicDetect(fields) {
@@ -37,8 +78,11 @@
       var isSafe       = true;
       var confidence   = 0.5;
       var genType      = 'faker';
+      var businessId   = /\b(abn|acn)\b/.exec(_spaced(f.name + ' ' + (f.label || '')));
 
-      if (type === 'email' || /email/.test(combined)) {
+      if (businessId) {
+        detectedType = businessId[1]; confidence = 0.85;
+      } else if (type === 'email' || /email/.test(combined)) {
         detectedType = 'email'; confidence = 0.9;
       } else if (type === 'password' || /password/.test(combined)) {
         detectedType = 'password'; isSafe = false; confidence = 0.95;
@@ -64,8 +108,10 @@
         detectedType = 'state'; confidence = 0.75;
       } else if (/\bcountry\b/.test(combined)) {
         detectedType = 'country'; confidence = 0.8;
-      } else if (type === 'date' || /\bdate\b|birthday|birth.?day|\bdob\b/.test(combined)) {
-        detectedType = 'dob'; confidence = 0.75;
+      } else if (BIRTH_RE.test(_spaced(name + ' ' + label + ' ' + ariaLabel + ' ' + (f.context || '')))) {
+        detectedType = 'dob'; confidence = 0.8;
+      } else if (type === 'date' || /\bdate\b/.test(combined)) {
+        detectedType = 'date'; confidence = 0.6;
       } else if (/business|company|org(anisation|anization)?/.test(combined)) {
         detectedType = 'business'; confidence = 0.75;
       } else if (/\busername\b|user.?name/.test(combined)) {
@@ -90,28 +136,41 @@
   // ---------------------------------------------------------------------------
   // LLM prompt builder
   // ---------------------------------------------------------------------------
-  function _buildDetectionPrompt(fields) {
-    var fieldsJson = JSON.stringify(
-      fields.map(function (f) {
-        return { name: f.name, type: f.type, label: f.label, ariaLabel: f.ariaLabel, placeholder: f.placeholder };
-      }),
-      null, 2
-    );
+  // Everything the page tells us about a field — the LLM picks values from this.
+  function _describeField(f) {
+    var out = { name: f.name || f.htmlName, type: f.type || f.htmlType, label: f.label };
+    ['ariaLabel', 'placeholder', 'context', 'options', 'maxLength', 'min', 'max', 'pattern', 'required']
+      .forEach(function (k) {
+        var v = f[k];
+        if (v !== undefined && v !== null && v !== '' && !(Array.isArray(v) && !v.length)) out[k] = v;
+      });
+    return out;
+  }
 
-    return 'Analyze this form. For each field, determine:\n' +
-      '1. What data type does it expect? (name, email, address, phone, date, custom, etc.)\n' +
-      '2. Is it safe to auto-fill? (flag password, card, SSN as high-risk)\n' +
-      '3. For custom fields, what kind of test value would fit?\n\n' +
+  function _buildDetectionPrompt(fields) {
+    var fieldsJson = JSON.stringify(fields.map(_describeField), null, 2);
+
+    return 'You are filling a web form with realistic test data. For each field, read its label, ' +
+      'name, placeholder, section (context), options and constraints, then decide:\n' +
+      '1. detectedType — one of: ' + CANONICAL_TYPES.join(', ') + '. Use "dob" for any date-of-birth ' +
+      'field, including separate day / month / year parts. If none fit, use a short snake_case ' +
+      'description of what the field asks for (e.g. "job_title", "abn", "appointment_date").\n' +
+      '2. isSafe — false for password, card, CVV, SSN / tax file number fields.\n' +
+      '3. suggestedValue — only for fields whose detectedType is NOT in the list above: a realistic ' +
+      'value that answers what the label and name ask for. If options are listed, return one of ' +
+      'them exactly. Respect maxLength/min/max/pattern. Dates as YYYY-MM-DD. Never use placeholder ' +
+      'text such as "test", "text_custom" or the field name.\n\n' +
       'Fields:\n' + fieldsJson + '\n\n' +
-      'Return a JSON array where each element has:\n' +
+      'Return ONLY a JSON array, one element per field, in the same order:\n' +
       '{\n' +
       '  "htmlName": "<form field name>",\n' +
       '  "htmlType": "<input type>",\n' +
       '  "label": "<detected label>",\n' +
-      '  "detectedType": "<canonical or custom>",\n' +
+      '  "detectedType": "<canonical type or snake_case description>",\n' +
       '  "isSafe": <true|false>,\n' +
       '  "confidence": <0.0-1.0>,\n' +
-      '  "suggestedGenerationType": "<faker|increment|random>"\n' +
+      '  "suggestedGenerationType": "<faker|increment|random>",\n' +
+      '  "suggestedValue": "<value, non-canonical fields only>"\n' +
       '}\n\n' +
       'Be conservative: if unsure, mark isSafe=false and confidence<0.8.';
   }
@@ -269,6 +328,7 @@
       if (response && response.result) {
         var parsed = _parseLLMFields(response.result);
         if (parsed) {
+          parsed = _normalizeDetections(parsed);
           // Cache and return LLM result
           var cache = _pruneExpired(_loadCache());
           cache[url] = { signature: signature, fields: parsed, cachedAt: Date.now() };
@@ -289,19 +349,95 @@
     });
   }
 
+  // Values that mean "the generator gave up" — never write these into a form.
+  function _isJunkValue(value, field) {
+    var v = String(value == null ? '' : value).trim();
+    if (!v) return true;
+    if (/^text_/i.test(v) || /^(custom|test|n\/a|null|undefined|value)$/i.test(v)) return true;
+    var name = field.htmlName || field.name;
+    return !!name && v.toLowerCase() === String(name).toLowerCase();
+  }
+
+  // Clean a raw LLM answer and check it fits the field; returns '' if it doesn't.
+  function _acceptValue(raw, field) {
+    var v = String(raw == null ? '' : raw).trim().split(/\r?\n/)[0].trim()
+      .replace(/^(value|answer)\s*:\s*/i, '')
+      .replace(/^["'`]+|["'`]+$/g, '')
+      .trim();
+    if (_isJunkValue(v, field)) return '';
+    if (Array.isArray(field.options) && field.options.length) {
+      var match = field.options.find(function (o) { return String(o).toLowerCase() === v.toLowerCase(); });
+      return match !== undefined ? String(match) : '';
+    }
+    var type = (field.htmlType || field.type || '').toLowerCase();
+    if ((type === 'number' || type === 'range') && isNaN(Number(v))) return '';
+    if (field.maxLength > 0 && v.length > field.maxLength) v = v.slice(0, field.maxLength);
+    return v;
+  }
+
+  function _buildValuePrompt(field) {
+    return 'You are filling a web form with realistic test data. Choose a value for this field ' +
+      'based on what its label and name ask for:\n' +
+      JSON.stringify(_describeField(field), null, 2) + '\n\n' +
+      'Rules: return ONLY the value, with no quotes or explanation. If options are listed, return one ' +
+      'of them exactly. Respect maxLength/min/max/pattern. Dates as YYYY-MM-DD. Never return ' +
+      'placeholder text such as "test", "text_custom" or the field name.';
+  }
+
+  function _isoToday(offsetDays) {
+    var d = new Date(Date.now() + (offsetDays || 0) * 86400000);
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' +
+      String(d.getDate()).padStart(2, '0');
+  }
+
+  // Offline fallback: a sensible value from the field's type and wording, or '' to leave it blank.
+  function _localValue(field) {
+    var type = (field.htmlType || field.type || '').toLowerCase();
+    var text = _spaced([field.label, field.htmlName || field.name, field.placeholder, field.detectedType].join(' '));
+    var options = Array.isArray(field.options) ? field.options : [];
+    if (options.length) return String(options[0]);
+
+    var min = field.min !== undefined && field.min !== '' ? Number(field.min) : NaN;
+    var max = field.max !== undefined && field.max !== '' ? Number(field.max) : NaN;
+    if (type === 'number' || type === 'range' || /\b(age|qty|quantity|count|number of)\b/.test(text)) {
+      var lo = isNaN(min) ? 1 : min, hi = isNaN(max) ? (/\bage\b/.test(text) ? 65 : 10) : max;
+      if (/\bage\b/.test(text) && isNaN(min)) lo = 25;
+      return String(Math.round(lo + (hi - lo) / 2));
+    }
+    if (type === 'date') return _isoToday(7);
+    if (type === 'datetime-local') return _isoToday(7) + 'T09:30';
+    if (type === 'month') return _isoToday(0).slice(0, 7);
+    if (type === 'time') return '09:30';
+    if (type === 'color') return '#3366cc';
+    if (type === 'url' || /\b(website|url|homepage)\b/.test(text)) return 'https://www.example.com';
+    if (/\bdate\b/.test(text)) return _isoToday(7);
+    if (/\babn\b/.test(text)) return '51 824 753 556';
+    if (/\bacn\b/.test(text)) return '004 085 616';
+    if (/job title|\bposition\b|\boccupation\b|\brole\b/.test(text)) return 'Software Engineer';
+    if (/\b(reference|ref)\b/.test(text) && root.SFFormData && root.SFFormData.CUSTOM_GENERATORS) {
+      return root.SFFormData.CUSTOM_GENERATORS.reference();
+    }
+    if (type === 'textarea' || /\b(comment|comments|message|notes?|description|details|enquiry|inquiry)\b/.test(text)) {
+      return 'Sample enquiry entered by SmartForm Filler for testing purposes.';
+    }
+    return '';
+  }
+
   /**
    * generateCustomFieldValue(field) → Promise<string>
    *
-   * field: { htmlName, detectedType, type, ... }
+   * field: { htmlName, htmlType, label, placeholder, context, options, detectedType,
+   *          suggestedValue, llmUnavailable, ... }
    *
    * Priority:
    *   1. window.SFFormData.CUSTOM_GENERATORS[detectedType] — formdata.js hook
-   *   2. LLM prompt asking for a realistic test value
-   *   3. Fallback: "text_<type>"
+   *   2. suggestedValue the LLM chose during detection
+   *   3. LLM prompt describing the field (skipped when field.llmUnavailable)
+   *   4. Local heuristic from the field's type and wording
+   *   5. '' — nothing appropriate; the caller leaves the field blank
    */
   function generateCustomFieldValue(field) {
     field = field || {};
-    var fieldName = field.htmlName || field.name || 'field';
     var fieldType = field.detectedType || field.type || 'text';
 
     // 1. formdata.js custom generator hook
@@ -317,17 +453,38 @@
       }
     }
 
-    // 2. LLM
-    var prompt = 'Generate a realistic test value for a ' + fieldType +
-      ' field named "' + fieldName + '". Return only the value, no explanation.';
+    // 2. Value already chosen during detection
+    var suggested = _acceptValue(field.suggestedValue, field);
+    if (suggested) return Promise.resolve(suggested);
 
+    if (field.llmUnavailable) return Promise.resolve(_localValue(field));
+
+    // 3. LLM
+    return _callLLM(_buildValuePrompt(field)).then(function (response) {
+      var accepted = response && response.result ? _acceptValue(response.result, field) : '';
+      // 4/5. Local heuristic, else ''
+      return accepted || _localValue(field);
+    });
+  }
+
+  /**
+   * suggestFieldValue(field) → Promise<{ value } | { error }>
+   *
+   * AI-only suggestion for one field (right-click "Fill with AI suggestion"): the LLM
+   * chooses from the field's label, name, placeholder, options and constraints. No profile
+   * data, generators or local fallback. field.currentValue, when set, asks for a different value.
+   */
+  function suggestFieldValue(field) {
+    field = field || {};
+    var prompt = _buildValuePrompt(field);
+    if (field.currentValue) {
+      prompt += '\nThe field currently contains "' + String(field.currentValue).slice(0, 200) +
+        '" — suggest a different value.';
+    }
     return _callLLM(prompt).then(function (response) {
-      if (response && response.result) {
-        var trimmed = String(response.result).trim();
-        if (trimmed.length > 0) return trimmed;
-      }
-      // 3. Fallback
-      return 'text_' + fieldType;
+      if (!response || !response.result) return { error: (response && response.error) || 'No response from AI' };
+      var value = _acceptValue(response.result, field);
+      return value ? { value: value } : { error: 'AI did not return a usable value' };
     });
   }
 
@@ -338,7 +495,8 @@
     detectFormFields: detectFormFields,
     getFieldDetectionCache: getFieldDetectionCache,
     clearDetectionCache: clearDetectionCache,
-    generateCustomFieldValue: generateCustomFieldValue
+    generateCustomFieldValue: generateCustomFieldValue,
+    suggestFieldValue: suggestFieldValue
   };
 
 })(typeof window !== 'undefined' ? window : globalThis);
