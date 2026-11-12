@@ -194,6 +194,49 @@
     return BIRTH_RE.test(spacedText(`${field.label} ${field.name} ${field.placeholder} ${field.context || ''}`));
   }
 
+  const GENDER_RE = /\bgender\b|\bsex\b/;
+  function isGenderField(field) {
+    return GENDER_RE.test(spacedText(`${field.label} ${field.name} ${field.placeholder} ${field.context || ''}`));
+  }
+  // Does an option's text/value stand for the wanted gender? 'Male' matches "M", "Man", "male";
+  // other values ("Non-binary", "Prefer not to say") match by text.
+  function genderOptionMatches(text, wanted) {
+    const t = String(text || '').trim().toLowerCase(), w = String(wanted || '').trim().toLowerCase();
+    if (!t || !w) return false;
+    const kind = s => /^(m|male|man|boy|mr)$/.test(s) ? 'male' : /^(f|female|woman|girl|mrs|ms|miss)$/.test(s) ? 'female' : null;
+    if (kind(t) && kind(t) === kind(w)) return true;
+    return t === w || (w.length > 2 && t.indexOf(w) !== -1);
+  }
+  // Text a choice control stands for: its value plus its own label.
+  function choiceText(el) {
+    const own = el.id ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`) : null;
+    const label = own || el.closest('label');
+    return [el.value, label ? label.textContent : ''];
+  }
+  // A gender <select> gets the option matching the profile's value (text or code).
+  function genderSelectValue(el, wanted) {
+    const opt = Array.from(el.options || []).find(o =>
+      genderOptionMatches(o.textContent, wanted) || genderOptionMatches(o.value, wanted));
+    return opt ? opt.value : null;
+  }
+  // Gender radio groups: tick the radio matching the profile's value. Returns the number ticked.
+  function fillGenderRadios(controls, wanted) {
+    if (!wanted) return 0;
+    const groups = new Map();
+    controls.forEach(el => {
+      if ((el.type || '').toLowerCase() !== 'radio' || !el.name) return;
+      if (!groups.has(el.name)) groups.set(el.name, []);
+      groups.get(el.name).push(el);
+    });
+    let n = 0;
+    groups.forEach(radios => {
+      if (!radios.some(r => isGenderField(describeControl(r)))) return;
+      const hit = radios.find(r => choiceText(r).some(t => genderOptionMatches(t, wanted)));
+      if (hit && !hit.checked && applyValueToElement(hit, 'true')) n++;
+    });
+    return n;
+  }
+
   /**
    * Which part of a date a control holds: 'day' | 'month' | 'year' | 'full'.
    * Selects are judged by their options; text inputs by their wording.
@@ -279,6 +322,7 @@
     if (/\bpassword\b|\bpwd\b|\bpass(word)?\b/.test(text)) return 'password';
     if (isBirthField(field)) return 'dob';
     if (type === 'date') return 'date'; // a date, but not a birth date — don't fill it with a DOB
+    if (isGenderField(field)) return 'gender';
 
     if (/\bfirst.?name\b|\bgiven.?name\b|\bfname\b/.test(text)) return 'firstName';
     if (/\blast.?name\b|\bsurname\b|\blname\b|\bfamily.?name\b/.test(text)) return 'lastName';
@@ -832,11 +876,23 @@
           const isSelect = el.tagName.toLowerCase() === 'select';
           const category = getFieldCategory(field);
 
-          // Skip fields gated out by policy/override
-          if (!(category in values)) continue;
-
           // Already done — only revisit a <select> a dependency reset to empty.
           if (handled.has(el) && !(isSelect && isEmptyValue(el))) continue;
+
+          // The profile's own custom fields win over the built-in categories.
+          if (type !== 'radio' && !handled.has(el)) {
+            const custom = await customFieldValue(profile, Object.assign(describeControl(el), field), el, opts);
+            if (custom) {
+              handled.add(el);
+              if (!custom.skip && applyValueToElement(el, adaptCustomValue(el, field, category, custom.value, profile.country))) {
+                changed++; filledCount++;
+              }
+              continue;
+            }
+          }
+
+          // Skip fields gated out by policy/override
+          if (!(category in values)) continue;
 
           if (type === 'checkbox' || type === 'radio') {
             const policy = type === 'checkbox' ? checkboxPolicy(field) : 'leave';
@@ -853,6 +909,7 @@
           let value = values[category];
           if (value === null || value === undefined) continue;
           if (category === 'dob') value = adaptDateValue(el, field, value, profile.country);
+          if (category === 'gender' && isSelect) value = genderSelectValue(el, value) || value;
 
           const isAuto = isAutocompleteInput(el);
 
@@ -881,6 +938,9 @@
         if (changed === 0) break;     // form has stabilised
         await sleep(60);              // let frameworks (React/Vue) apply dependent changes
       }
+
+      // Gender radio groups are skipped above (radios are left alone); tick the matching one.
+      if ('gender' in values) filledCount += fillGenderRadios(detectedFields.map(f => f.element), values.gender);
 
       // Safety net: restore any field a blur-geocode may have overwritten.
       reassertValues(intended);
@@ -964,6 +1024,43 @@
     return values;
   }
 
+  /**
+   * The profile's custom field matching this control, as { value } to fill, { skip: true } to
+   * leave it alone, or null when no custom field matches. Group fills ("Fill name") ignore
+   * custom fields. Random custom fields are chosen by the AI, guided by the custom field's label.
+   */
+  async function customFieldValue(profile, desc, el, opts) {
+    const F = window.SFFormData;
+    if ((opts && opts.only) || !F || !F.matchCustomField) return null;
+    const cf = F.matchCustomField(profile, desc);
+    if (!cf) return null;
+    if (cf.mode === 'skip') return { skip: true };
+    if (cf.mode === 'random') {
+      if (!window.SFAIDetector || /^(checkbox|radio)$/i.test(desc.type || '')) return { skip: true };
+      const stop = el ? showFieldThrobber(el) : null;
+      try {
+        const value = await window.SFAIDetector.generateCustomFieldValue(Object.assign({}, desc, {
+          htmlName: desc.htmlName || desc.name, htmlType: desc.htmlType || desc.type,
+          detectedType: 'custom', suggestedValue: undefined, profileHint: cf.label || cf.labelHint
+        }));
+        return value ? { value } : { skip: true };
+      } finally {
+        if (stop) stop();
+      }
+    }
+    return cf.value !== undefined && cf.value !== '' ? { value: cf.value } : { skip: true };
+  }
+  // Fit a custom field's value to its control: dates are rendered in the field's format,
+  // gender selects get their matching option.
+  function adaptCustomValue(el, field, category, value, country) {
+    const iso = window.SFFormData.toISODate(value);
+    if (iso && (category === 'dob' || category === 'date' || isBirthField(field))) {
+      return adaptDateValue(el, field, iso, country);
+    }
+    if (category === 'gender' && el.tagName.toLowerCase() === 'select') return genderSelectValue(el, value) || value;
+    return value;
+  }
+
   /** Load the currently-active profile (defaultProfile or first). */
   function getActiveProfile() { return loadProfile(null); }
 
@@ -1022,6 +1119,8 @@
     }
 
     // ── Custom / unknown field → AI picks a value from label, name, options… ─
+    // Group fills ("Fill name", "Fill address") only touch their groups' fields.
+    if (opts && opts.only) return undefined;
     // Checkboxes/radios are left alone: there is no meaningful "value" to invent.
     const htmlType = (field.htmlType || field.type || '').toLowerCase();
     if (htmlType === 'checkbox' || htmlType === 'radio') return undefined;
@@ -1047,7 +1146,10 @@
       if (!el || !el.isConnected || entry.value === undefined || entry.value === null) return;
       const isDate = entry.detectedType === 'dob' || entry.detectedType === 'date';
       const iso = isDate ? window.SFFormData.toISODate(entry.value) : null;
-      const finalValue = iso ? adaptDateValue(el, describeControl(el), iso, country) : entry.value;
+      let finalValue = iso ? adaptDateValue(el, describeControl(el), iso, country) : entry.value;
+      if (entry.detectedType === 'gender' && el.tagName.toLowerCase() === 'select') {
+        finalValue = genderSelectValue(el, finalValue) || finalValue;
+      }
       if (applyValueToElement(el, finalValue)) filledCount++;
     });
     return filledCount;
@@ -1113,6 +1215,15 @@
       // The LLM sometimes misses split DOB parts (Day / Month / Year); the page's wording wins.
       if (aiField.detectedType !== 'dob' && isBirthField(dom)) aiField.detectedType = 'dob';
       aiField.htmlName = dom.name;
+      const ctl = allControls[idx];
+      if ((ctl.type || '').toLowerCase() !== 'radio') {
+        const custom = await customFieldValue(activeProfile,
+          Object.assign({}, dom, { llmUnavailable: !!aiResult.error }), ctl, opts);
+        if (custom) {
+          if (!custom.skip) entries.push({ el: ctl, value: custom.value, detectedType: aiField.detectedType });
+          continue;
+        }
+      }
       // Checkboxes/radios follow the same rule as the heuristic path: tick consent boxes,
       // leave everything else (contact-preference toggles, "same as billing") untouched.
       const ctlType = (allControls[idx].type || '').toLowerCase();
@@ -1134,7 +1245,8 @@
       if (value !== undefined) entries.push({ el: allControls[idx], value: value, detectedType: aiField.detectedType });
     }
 
-    const filledCount = fillFormWithValues(entries, activeProfile.country);
+    let filledCount = fillFormWithValues(entries, activeProfile.country);
+    if ('gender' in standardValues) filledCount += fillGenderRadios(allControls, standardValues.gender);
     return {
       success:     true,
       filledCount,

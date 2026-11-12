@@ -16,7 +16,7 @@ ok(html.indexOf('newProfileBtn') !== -1, 'options.html has #newProfileBtn');
 const js = fs.readFileSync(path.resolve(__dirname, '..', 'options.js'), 'utf8');
 ['profilesCreate','profilesClone','profilesRename','profilesDelete','profilePatch'].forEach(fn =>
   ok(js.indexOf(fn) !== -1, `options.js uses ${fn}`));
-ok(js.indexOf('renderAddressFields') !== -1, 'options.js uses SFProfileUI.renderAddressFields');
+ok(js.indexOf('SFAddress.getFieldConfig') !== -1, 'options.js takes address field labels from the country schema');
 ok(js.indexOf('listCountries') !== -1, 'options.js builds country picker from listCountries');
 
 done('options-wiring');
