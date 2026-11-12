@@ -445,6 +445,31 @@
     .current-model-card .model-card:hover::after,
     .current-model-card .model-card:focus-visible::after { opacity: 1; }
 
+    /* Keyboard shortcut recorder */
+    .subsection-title { font-size: 15px; font-weight: 600; margin: 0 0 6px; }
+    kbd {
+      font-family: ui-monospace, monospace; font-size: 12px;
+      background: var(--surface-2); color: var(--text);
+      border: 1px solid var(--border-strong); border-bottom-width: 2px;
+      border-radius: 5px; padding: 1px 6px;
+    }
+    .hotkey-row {
+      display: flex; align-items: center; justify-content: space-between; gap: 16px;
+      padding: 12px 0; border-bottom: 1px solid var(--border);
+    }
+    .hotkey-row:last-child { border-bottom: none; }
+    .hotkey-row .hk-name { font-weight: 600; font-size: 14px; }
+    .hotkey-row .hk-help { font-size: 12.5px; color: var(--text-subtle); }
+    .hotkey-btn {
+      min-width: 150px; justify-content: center;
+      font-family: ui-monospace, monospace; font-size: 13px;
+    }
+    .hotkey-btn.recording {
+      border-color: var(--primary); background: var(--primary-soft); color: var(--text);
+      outline: 2px solid var(--primary); outline-offset: 1px;
+    }
+    .hotkey-btn.off { color: var(--text-subtle); font-style: italic; }
+
     /* Profiles list + editor (rows are built by the options script) */
     .profile-row {
       display: flex;
@@ -553,6 +578,17 @@
     </select>
 
     <button id="btnSaveBehavior" class="btn">Save Behavior Settings</button>
+
+    <div class="divider" style="margin-top: 24px;">
+      <h3 class="subsection-title">⌨️ Keyboard shortcuts</h3>
+      <p class="hint" style="margin-top: 0;">Click a shortcut, then press the new key combination (include Ctrl, Alt or ⌘).
+        <kbd>Esc</kbd> cancels, <kbd>Backspace</kbd> turns the shortcut off. Changes apply to open tabs straight away.</p>
+      <div id="hotkeyList"></div>
+      <div class="row" style="align-items: center;">
+        <button id="btnResetHotkeys" class="btn btn-secondary" type="button">Reset to defaults</button>
+        <span id="hotkeyStatus" class="status" style="display: none; margin-top: 0;"></span>
+      </div>
+    </div>
   </div>
 
   <!-- Test Profiles -->
@@ -654,6 +690,7 @@
   <script src="ai-field-detector.js"></script>
   <script src="form-registry.js"></script>
   <script src="profile-ui.js"></script>
+  <script src="hotkeys.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

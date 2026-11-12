@@ -24,7 +24,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["vendor/address-schemas.js", "formdata.js", "profile-ui.js", "ai-field-detector.js", "form-registry.js", "content.js"],
+      "js": ["vendor/address-schemas.js", "formdata.js", "profile-ui.js", "ai-field-detector.js", "form-registry.js", "hotkeys.js", "content.js"],
       "run_at": "document_idle",
       "all_frames": false
     }

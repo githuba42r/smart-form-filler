@@ -1617,6 +1617,59 @@
   });
 
   // Add the per-form scan icons once the DOM is ready.
+  // ============================================================
+  // Keyboard shortcuts (configured in settings; see hotkeys.js)
+  // ============================================================
+  let hotkeys = window.SFHotkeys ? window.SFHotkeys.resolve(null) : {};
+
+  function loadHotkeys() {
+    if (!window.SFHotkeys) return;
+    const key = window.SFHotkeys.STORAGE_KEY;
+    try {
+      chrome.storage.local.get([key]).then(s => { hotkeys = window.SFHotkeys.resolve(s && s[key]); }).catch(() => {});
+      if (chrome.storage.onChanged) {
+        chrome.storage.onChanged.addListener((changes, area) => {
+          if (area === 'local' && changes[key]) hotkeys = window.SFHotkeys.resolve(changes[key].newValue);
+        });
+      }
+    } catch (_) { /* extension context invalidated — keep defaults */ }
+  }
+
+  // A focused control the AI can fill on its own (not buttons, checkboxes or radios).
+  function focusedFillable() {
+    const el = document.activeElement;
+    if (!el || !el.matches || !el.matches(FILLABLE_SELECTOR)) return null;
+    const t = (el.type || '').toLowerCase();
+    if (t === 'checkbox' || t === 'radio' || el.disabled || el.readOnly) return null;
+    return el;
+  }
+
+  async function runFillFormHotkey() {
+    const { defaultProfile = null } = await chrome.storage.local.get(['defaultProfile']);
+    showToast('SmartForm: AI is filling the form…');
+    const res = await fillWithProfile(defaultProfile, { only: null, unique: true });
+    showToast(res && res.filledCount
+      ? `Filled ${res.filledCount} field${res.filledCount === 1 ? '' : 's'}`
+      : (res && res.message) || 'No matching fields on this page');
+  }
+
+  function onHotkey(e) {
+    if (e.repeat || !window.SFHotkeys) return;
+    const H = window.SFHotkeys;
+    if (H.matches(e, hotkeys.fillField)) {
+      e.preventDefault(); e.stopPropagation();
+      const el = focusedFillable();
+      if (!el) { showToast('SmartForm: focus an input field first'); return; }
+      aiSuggestField(el);
+    } else if (H.matches(e, hotkeys.fillForm)) {
+      e.preventDefault(); e.stopPropagation();
+      runFillFormHotkey().catch(err => showToast('Error filling fields: ' + (err && err.message || 'Unknown')));
+    }
+  }
+
+  loadHotkeys();
+  window.addEventListener('keydown', onHotkey, true);
+
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initFormIcons, { once: true });
   } else {

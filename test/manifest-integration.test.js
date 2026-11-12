@@ -3,7 +3,7 @@ const { ok, eq, done } = require('./harness');
 const root = path.resolve(__dirname, '..');
 const m = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
 eq(m.content_scripts[0].js,
-  ['vendor/address-schemas.js', 'formdata.js', 'profile-ui.js', 'ai-field-detector.js', 'form-registry.js', 'content.js'],
+  ['vendor/address-schemas.js', 'formdata.js', 'profile-ui.js', 'ai-field-detector.js', 'form-registry.js', 'hotkeys.js', 'content.js'],
   'content script load order');
 eq(m.version, '1.1.0', 'version bumped');
 const popup = fs.readFileSync(path.join(root, 'popup.html'), 'utf8');

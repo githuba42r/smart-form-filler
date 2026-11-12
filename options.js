@@ -533,6 +533,106 @@ document.addEventListener('DOMContentLoaded', async () => {
   wireSeg(segQuality, 'quality');
 
   // ========== BEHAVIOR ==========
+  // ========== KEYBOARD SHORTCUTS ==========
+  // Recorder for SFHotkeys combos; content.js picks changes up via storage.onChanged.
+  const hotkeyList = document.getElementById('hotkeyList');
+  const hotkeyStatus = document.getElementById('hotkeyStatus');
+  const btnResetHotkeys = document.getElementById('btnResetHotkeys');
+  let hotkeySettings = null;
+  let stopRecording = null;
+
+  function showHotkeyStatus(text, kind) {
+    if (!hotkeyStatus) return;
+    hotkeyStatus.textContent = text;
+    hotkeyStatus.className = 'status ' + kind;
+    hotkeyStatus.style.display = 'inline-block';
+    clearTimeout(showHotkeyStatus._t);
+    showHotkeyStatus._t = setTimeout(() => { hotkeyStatus.style.display = 'none'; }, 3500);
+  }
+
+  async function saveHotkeys(next) {
+    hotkeySettings = next;
+    await chrome.storage.local.set({ [SFHotkeys.STORAGE_KEY]: next });
+    renderHotkeys();
+  }
+
+  function renderHotkeys() {
+    if (!hotkeyList || typeof SFHotkeys === 'undefined') return;
+    hotkeyList.innerHTML = '';
+    Object.keys(SFHotkeys.ACTIONS).forEach(action => {
+      const info = SFHotkeys.ACTIONS[action];
+      const combo = hotkeySettings[action];
+      const row = document.createElement('div');
+      row.className = 'hotkey-row';
+      const text = document.createElement('div');
+      const name = document.createElement('div'); name.className = 'hk-name'; name.textContent = info.label;
+      const help = document.createElement('div'); help.className = 'hk-help'; help.textContent = info.help;
+      text.appendChild(name); text.appendChild(help);
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn-secondary hotkey-btn' + (combo ? '' : ' off');
+      btn.setAttribute('data-hotkey', action);
+      btn.textContent = combo ? SFHotkeys.label(combo) : 'Off';
+      btn.title = 'Click, then press a new shortcut';
+      btn.addEventListener('click', () => startRecording(action, btn));
+      row.appendChild(text); row.appendChild(btn);
+      hotkeyList.appendChild(row);
+    });
+  }
+
+  function startRecording(action, btn) {
+    if (stopRecording) stopRecording();
+    btn.classList.add('recording');
+    btn.textContent = 'Press keys…';
+    const onKey = async (e) => {
+      e.preventDefault(); e.stopPropagation();
+      if (e.key === 'Escape') { stop(); renderHotkeys(); return; }
+      if (e.key === 'Backspace' || e.key === 'Delete') {
+        stop();
+        await saveHotkeys(Object.assign({}, hotkeySettings, { [action]: null }));
+        showHotkeyStatus(SFHotkeys.ACTIONS[action].label + ' shortcut turned off', 'info');
+        return;
+      }
+      const combo = SFHotkeys.fromEvent(e);
+      if (!combo) { btn.textContent = SFHotkeys.label({ ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey, code: '…' }); return; }
+      if (!SFHotkeys.isValid(combo)) {
+        showHotkeyStatus('Include Ctrl, Alt or ⌘ (or use F1–F24) so typing isn’t hijacked', 'error');
+        return;
+      }
+      const clash = Object.keys(hotkeySettings).find(k => k !== action && SFHotkeys.same(hotkeySettings[k], combo));
+      if (clash) {
+        showHotkeyStatus(SFHotkeys.label(combo) + ' is already used for “' + SFHotkeys.ACTIONS[clash].label + '”', 'error');
+        return;
+      }
+      stop();
+      await saveHotkeys(Object.assign({}, hotkeySettings, { [action]: combo }));
+      showHotkeyStatus(SFHotkeys.ACTIONS[action].label + ': ' + SFHotkeys.label(combo), 'success');
+    };
+    const onBlur = () => { stop(); renderHotkeys(); };
+    function stop() {
+      window.removeEventListener('keydown', onKey, true);
+      btn.removeEventListener('blur', onBlur);
+      btn.classList.remove('recording');
+      stopRecording = null;
+    }
+    window.addEventListener('keydown', onKey, true);
+    btn.addEventListener('blur', onBlur);
+    stopRecording = stop;
+  }
+
+  if (btnResetHotkeys) btnResetHotkeys.addEventListener('click', async () => {
+    if (stopRecording) stopRecording();
+    await saveHotkeys(SFHotkeys.resolve(null));
+    showHotkeyStatus('Shortcuts reset to defaults', 'success');
+  });
+
+  (async function initHotkeys() {
+    if (typeof SFHotkeys === 'undefined') return;
+    const stored = await chrome.storage.local.get([SFHotkeys.STORAGE_KEY]);
+    hotkeySettings = SFHotkeys.resolve(stored[SFHotkeys.STORAGE_KEY]);
+    renderHotkeys();
+  })();
+
   if (btnSaveBehavior) btnSaveBehavior.addEventListener('click', async () => {
     await chrome.storage.local.set({ defaultProfile: defaultProfileSelect.value });
     const status = document.createElement('div');

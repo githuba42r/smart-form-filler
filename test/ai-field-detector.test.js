@@ -235,6 +235,21 @@ const LLM_DETECTED_FIELDS = [
   }
 
   // -------------------------------------------------------------------------
+  // Test 5f: fields the LLM omits fall back to heuristics
+  // -------------------------------------------------------------------------
+  {
+    const win = bootstrap({ sendMessageResponse: { result: JSON.stringify([{ htmlName: 'fav', detectedType: 'wine_varietal' }]) } });
+    const res = await win.SFAIDetector.detectFormFields({ url: 'https://example.com/gaps', fields: [
+      { name: 'fav', type: 'text', label: 'Favourite wine' },
+      { name: 'email', type: 'email', label: 'Email' }
+    ] });
+    eq(res.fields.map(f => f.htmlName + ':' + f.detectedType), ['fav:wine_varietal', 'email:email'], 'omitted field classified by heuristics');
+    const empty = bootstrap({ sendMessageResponse: { result: '[]' } });
+    const r2 = await empty.SFAIDetector.detectFormFields({ url: 'https://example.com/empty', fields: [{ name: 'email', type: 'email' }] });
+    eq(r2.fields.map(f => f.detectedType), ['email'], 'empty LLM answer → heuristics for every field');
+  }
+
+  // -------------------------------------------------------------------------
   // Test 5e: heuristics — split DOB parts are dob, other dates are not
   // -------------------------------------------------------------------------
   {

@@ -51,6 +51,15 @@
     var canonical = CANONICAL_TYPES.find(function (t) { return t.toLowerCase() === key; });
     return canonical || key;
   }
+  // Fields the LLM left out of its answer are classified by the heuristics instead of being skipped.
+  function _withHeuristicGaps(detected, fields) {
+    var named = {};
+    detected.forEach(function (d) { if (d && d.htmlName) named[d.htmlName] = true; });
+    var missing = fields.filter(function (f) { return f.name && !named[f.name]; });
+    if (!missing.length || detected.length >= fields.length) return detected;
+    return detected.concat(_heuristicDetect(missing));
+  }
+
   function _normalizeDetections(fields) {
     return fields.map(function (f) {
       return Object.assign({}, f, { detectedType: _normalizeType(f && f.detectedType) });
@@ -333,7 +342,7 @@
       if (response && response.result) {
         var parsed = _parseLLMFields(response.result);
         if (parsed) {
-          parsed = _normalizeDetections(parsed);
+          parsed = _withHeuristicGaps(_normalizeDetections(parsed), fields);
           // Cache and return LLM result
           var cache = _pruneExpired(_loadCache());
           cache[url] = { signature: signature, fields: parsed, cachedAt: Date.now() };
