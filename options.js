@@ -764,10 +764,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     btn.type = 'button';
     btn.className = 'btn btn-secondary hotkey-btn' + (opts.value ? '' : ' off');
     btn.setAttribute('data-hotkey', opts.id);
-    btn.textContent = opts.value || 'Off';
+    btn.textContent = opts.value || opts.emptyText || 'Off';
     btn.title = opts.single ? 'Click, then press a single key' : 'Click, then press a new shortcut';
     btn.disabled = !!opts.disabled;
     btn.addEventListener('click', () => startRecording(btn, opts));
+    if (opts.autoRecord) setTimeout(() => { btn.focus(); startRecording(btn, opts); }, 0);
     row.appendChild(text); row.appendChild(btn);
     container.appendChild(row);
   }
@@ -791,27 +792,32 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     if (!chordList) return;
-    if (chordEnabled) chordEnabled.checked = chord.enabled;
+    const pending = renderHotkeys.pendingLeader;
+    renderHotkeys.pendingLeader = false;
+    const active = chord.enabled || pending;
+    if (chordEnabled) chordEnabled.checked = active;
     chordList.innerHTML = '';
-    chordList.classList.toggle('disabled', !chord.enabled);
+    chordList.classList.toggle('disabled', !active);
     hotkeyRow(chordList, {
-      id: 'leader', name: 'Chord leader', disabled: !chord.enabled,
+      id: 'leader', name: 'Chord leader', disabled: !active, autoRecord: pending,
       help: 'Press this first — the ✨ form icon turns amber and waits for the next key.',
       value: chord.leader ? H.label(chord.leader) : '',
+      emptyText: 'Not set',
       onCombo: (c) => {
         const clash = comboClash(c, 'leader');
         if (clash) return H.label(c) + ' is already used for “' + clash + '”';
-        return saveHotkeys(withChord({ leader: c }));
+        return saveHotkeys(withChord({ leader: c, enabled: true }));
       },
-      onClear: () => saveHotkeys(withChord({ leader: null }))
+      // No leader → no chord.
+      onClear: () => saveHotkeys(withChord({ leader: null, enabled: false }))
     });
     Object.keys(H.ACTIONS).forEach(action => {
       const code = chord.keys[action];
       hotkeyRow(chordList, {
         id: 'chord-' + action, single: true, disabled: !chord.enabled,
         name: 'then ' + H.ACTIONS[action].label,
-        help: 'Single key pressed after the leader.',
-        value: code ? (chord.leader ? H.label(chord.leader) + ' → ' : '') + H.chordKeyLabel(code) : '',
+        help: chord.leader ? 'Key pressed after ' + H.label(chord.leader) + '.' : 'Key pressed after the leader.',
+        value: code ? H.chordKeyLabel(code) : '',
         onKey: (k) => {
           const other = Object.keys(chord.keys).find(a => a !== action && chord.keys[a] === k);
           if (other) return H.chordKeyLabel(k) + ' is already used for “' + H.ACTIONS[other].label + '”';
@@ -875,6 +881,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   if (chordEnabled) chordEnabled.addEventListener('change', async () => {
     const enabled = chordEnabled.checked;
+    if (enabled && !hotkeySettings.chord.leader) {
+      // Choose the leader first; the chord is saved as enabled once it's recorded.
+      renderChordPendingLeader();
+      showHotkeyStatus('Press the chord keys, e.g. Ctrl+Shift+F', 'info');
+      return;
+    }
     if (enabled && hotkeySettings.chord.leader) {
       const clash = Object.keys(SFHotkeys.ACTIONS).find(a => SFHotkeys.same(hotkeySettings[a], hotkeySettings.chord.leader));
       if (clash) {
@@ -887,6 +899,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     await saveHotkeys(withChord({ enabled }));
     showHotkeyStatus(enabled ? 'Chord shortcut enabled' : 'Chord shortcut disabled', 'info');
   });
+
+  function renderChordPendingLeader() {
+    renderHotkeys.pendingLeader = true;
+    renderHotkeys();
+  }
 
   if (btnResetHotkeys) btnResetHotkeys.addEventListener('click', async () => {
     if (stopRecording) stopRecording();

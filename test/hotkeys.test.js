@@ -45,6 +45,8 @@ function chromeWithEvents(initial) {
     eq(H.label({ ctrl: true, shift: true, code: 'KeyK' }), 'Ctrl+Shift+K', 'label');
     eq(H.resolve({ fillField: null }).fillField, null, 'stored null = disabled');
     eq(H.resolve({}).fillForm.code, 'KeyF', 'missing → default');
+    eq(H.resolve({}).chord.leader, null, 'chord leader defaults to empty');
+    eq(H.resolve({ chord: { enabled: true } }).chord.enabled, false, 'chord without a leader is treated as off');
   }
 
   section('settings recorder');
@@ -92,22 +94,31 @@ function chromeWithEvents(initial) {
     await tick();
     eq(btns()[0].textContent, 'Alt+Shift+F', 'reset restores defaults');
 
-    // Chord
+    // Chord: leader starts empty; enabling with no leader records it straight away
+    eq(btns()[2].textContent, 'Not set', 'chord leader defaults to empty');
+    eq(btns()[3].textContent, 'F', 'action rows show only the second key');
     const cb = win.document.getElementById('chordEnabled');
     cb.checked = true; cb.dispatchEvent(new win.Event('change'));
     await tick();
-    eq((await chrome.storage.local.get(['hotkeys'])).hotkeys.chord.enabled, true, 'chord enabled + saved');
-    ok(!btns()[2].disabled, 'chord rows enabled');
-    eq(btns()[2].textContent, 'Ctrl+Shift+F', 'default leader shown');
-    eq(btns()[4].textContent, 'Ctrl+Shift+F → S', 'chord key shown with its leader');
+    eq(btns()[2].textContent, 'Press keys…', 'enabling with no leader starts recording the leader');
+    eq((await chrome.storage.local.get(['hotkeys'])).hotkeys.chord.enabled, false, 'not saved as enabled until a leader is chosen');
 
-    btns()[2].click();
+    key(win, win.document.body, { code: 'Escape', key: 'Escape' });
+    await tick();
+    eq(cb.checked, false, 'cancelling the leader unticks the chord');
+
+    cb.checked = true; cb.dispatchEvent(new win.Event('change'));
+    await tick();
     key(win, win.document.body, { code: 'KeyF', key: 'F', altKey: true, shiftKey: true });
     await tick();
     ok(/already used/.test(win.document.getElementById('hotkeyStatus').textContent), 'leader may not reuse a direct shortcut');
     key(win, win.document.body, { code: 'Space', key: ' ', ctrlKey: true, shiftKey: true });
     await tick();
-    eq((await chrome.storage.local.get(['hotkeys'])).hotkeys.chord.leader.code, 'Space', 'new leader saved');
+    let hk = (await chrome.storage.local.get(['hotkeys'])).hotkeys;
+    eq([hk.chord.enabled, hk.chord.leader && hk.chord.leader.code], [true, 'Space'], 'leader recorded → chord saved as enabled');
+    ok(cb.checked && !btns()[3].disabled, 'action rows enabled');
+    eq(btns()[2].textContent, 'Ctrl+Shift+Space', 'leader shown');
+    ok(/after Ctrl\+Shift\+Space/.test(win.document.querySelectorAll('#chordList .hk-help')[1].textContent), 'action help names the leader');
 
     btns()[4].click();
     key(win, win.document.body, { code: 'KeyF', key: 'f' });
@@ -119,7 +130,21 @@ function chromeWithEvents(initial) {
     key(win, win.document.body, { code: 'KeyA', key: 'a' });
     await tick();
     eq((await chrome.storage.local.get(['hotkeys'])).hotkeys.chord.keys.fillField, 'KeyA', 'chord key saved');
-    eq(btns()[4].textContent, 'Ctrl+Shift+Space → A', 'chord key label updated');
+    eq(btns()[4].textContent, 'A', 'second key shown on its own');
+
+    // Untick and re-tick: the existing leader is kept, no re-recording
+    cb.checked = false; cb.dispatchEvent(new win.Event('change')); await tick();
+    cb.checked = true; cb.dispatchEvent(new win.Event('change')); await tick();
+    eq(btns()[2].textContent, 'Ctrl+Shift+Space', 're-enabling keeps the chosen leader');
+    eq((await chrome.storage.local.get(['hotkeys'])).hotkeys.chord.enabled, true, 're-enabled');
+
+    // Backspace on the leader clears it and switches the chord off
+    btns()[2].click();
+    key(win, win.document.body, { code: 'Backspace', key: 'Backspace' });
+    await tick();
+    hk = (await chrome.storage.local.get(['hotkeys'])).hotkeys;
+    eq([hk.chord.enabled, hk.chord.leader], [false, null], 'clearing the leader disables the chord');
+    eq(cb.checked, false, 'checkbox unticked');
   }
 
   section('in-page listener');
@@ -182,7 +207,8 @@ function chromeWithEvents(initial) {
     </form></body></html>`;
     const dom = new JSDOM(html, { runScripts: 'outside-only', pretendToBeVisual: true, url: 'https://test.example.com/' });
     const win = dom.window, ctx = dom.getInternalVMContext();
-    const chrome = chromeWithEvents({ hotkeys: { chord: { enabled: true } } });
+    const chrome = chromeWithEvents({ hotkeys: { chord: { enabled: true,
+      leader: { ctrl: true, alt: false, shift: true, meta: false, code: 'KeyF' } } } });
     const sent = [];
     chrome.runtime.sendMessage = (msg, cb) => {
       sent.push(msg);

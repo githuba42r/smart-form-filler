@@ -17,7 +17,7 @@
   // Chord: press the leader combo, release, then one plain key picks the action.
   var CHORD_DEFAULTS = {
     enabled: false,
-    leader: { ctrl: true, alt: false, shift: true, meta: false, code: 'KeyF' },
+    leader: null, // chosen by the user when the chord is first enabled
     keys: { fillForm: 'KeyF', fillField: 'KeyS' }
   };
   var CHORD_TIMEOUT_MS = 3000;
@@ -86,9 +86,10 @@
       out[k] = stored && Object.prototype.hasOwnProperty.call(stored, k) ? stored[k] : DEFAULTS[k];
     });
     var c = (stored && stored.chord) || {};
+    var leader = Object.prototype.hasOwnProperty.call(c, 'leader') ? c.leader : CHORD_DEFAULTS.leader;
     out.chord = {
-      enabled: !!c.enabled,
-      leader: Object.prototype.hasOwnProperty.call(c, 'leader') ? c.leader : CHORD_DEFAULTS.leader,
+      enabled: !!c.enabled && isValid(leader), // a chord without a leader can't fire
+      leader: leader,
       keys: Object.assign({}, CHORD_DEFAULTS.keys, c.keys || {})
     };
     return out;
