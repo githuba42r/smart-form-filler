@@ -1165,7 +1165,24 @@
         border-radius: 50%; border: 2px solid rgba(37, 99, 235, 0.25); border-top-color: #2563eb;
         box-sizing: border-box; animation: sf-spin 0.7s linear infinite;
       }
+      @keyframes sf-chord-pulse { 50% { box-shadow: 0 0 0 6px rgba(245, 158, 11, 0.25); } }
+      button[${SF_UI_ATTR}][${CHORD_ATTR}] {
+        background: #f59e0b !important; color: #111827 !important;
+        animation: sf-chord-pulse 1s ease-in-out infinite;
+      }
+      .sf-chord-hint {
+        position: fixed; z-index: 2147483647; background: #0f172a; color: #f1f5f9;
+        border: 1px solid #f59e0b; border-radius: 10px; padding: 8px 12px;
+        font: 13px/1.7 system-ui, -apple-system, sans-serif; box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3);
+      }
+      .sf-chord-hint .sf-chord-title { font-size: 11px; font-weight: 700; color: #fcd34d; letter-spacing: 0.3px; }
+      .sf-chord-hint kbd {
+        display: inline-block; min-width: 18px; text-align: center; margin-right: 6px;
+        font: 600 11px ui-monospace, monospace; color: #0f172a; background: #f1f5f9;
+        border-radius: 4px; padding: 0 5px; border-bottom: 2px solid #94a3b8;
+      }
       @media (prefers-reduced-motion: reduce) {
+        button[${SF_UI_ATTR}][${CHORD_ATTR}] { animation: none; }
         button[${SF_UI_ATTR}][${BUSY_ATTR}]::after, .sf-throbber, .sf-mini-spin { animation-duration: 2.4s; }
       }`;
     (document.head || document.documentElement).appendChild(style);
@@ -1412,8 +1429,31 @@
     const header = document.createElement('div');
     header.setAttribute('data-role', 'header');
     header.textContent = `${scanResult.fieldCount} field${scanResult.fieldCount === 1 ? '' : 's'} • ${scanResult.scopeName}`;
-    Object.assign(header.style, { fontSize: '11px', color: '#64748b', padding: '4px 8px 6px', fontWeight: '600' });
-    fillMenu.appendChild(header);
+    Object.assign(header.style, { fontSize: '11px', color: '#64748b', padding: '4px 8px 6px', fontWeight: '600', flex: '1' });
+    const cog = document.createElement('button');
+    cog.type = 'button';
+    cog.setAttribute(SF_UI_ATTR, '');
+    cog.setAttribute('data-role', 'settings');
+    cog.title = 'SmartForm settings';
+    cog.setAttribute('aria-label', 'Open SmartForm settings');
+    cog.textContent = '⚙';
+    Object.assign(cog.style, {
+      border: 'none', background: 'transparent', cursor: 'pointer', fontSize: '15px', lineHeight: '1',
+      color: '#64748b', padding: '4px 6px', borderRadius: '6px'
+    });
+    cog.addEventListener('mouseenter', () => { cog.style.background = '#f1f5f9'; cog.style.color = '#0f172a'; });
+    cog.addEventListener('mouseleave', () => { cog.style.background = 'transparent'; cog.style.color = '#64748b'; });
+    cog.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeFillMenu();
+      try { chrome.runtime.sendMessage({ action: 'openOptions' }, () => { void chrome.runtime.lastError; }); }
+      catch (_) { showToast('Reload the page to use SmartForm settings'); }
+    });
+    const headerRow = document.createElement('div');
+    Object.assign(headerRow.style, { display: 'flex', alignItems: 'center', gap: '4px' });
+    headerRow.appendChild(header);
+    headerRow.appendChild(cog);
+    fillMenu.appendChild(headerRow);
 
     // Style and wire menu elements from SFProfileUI.buildMenu
     Array.from(menu.children).forEach(el => {
@@ -1553,6 +1593,21 @@
       formButtons.push({ btn, target });
     });
     repositionButtons();
+    reportFormStatus();
+  }
+
+  // Tell the background how many fillable fields this page has, so the toolbar icon
+  // can switch between its grey (nothing to fill) and full-colour (fields found) versions.
+  let lastReportedCount = -1;
+  function reportFormStatus() {
+    const count = liveControls().length;
+    if (count === lastReportedCount) return;
+    lastReportedCount = count;
+    try {
+      if (chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({ action: 'formStatus', count }, () => { void chrome.runtime.lastError; });
+      }
+    } catch (_) { /* extension reloaded — page keeps working */ }
   }
 
   function scheduleBuild() {
@@ -1653,17 +1708,112 @@
       : (res && res.message) || 'No matching fields on this page');
   }
 
-  function onHotkey(e) {
-    if (e.repeat || !window.SFHotkeys) return;
-    const H = window.SFHotkeys;
-    if (H.matches(e, hotkeys.fillField)) {
-      e.preventDefault(); e.stopPropagation();
+  function runHotkeyAction(action) {
+    if (action === 'fillField') {
       const el = focusedFillable();
       if (!el) { showToast('SmartForm: focus an input field first'); return; }
       aiSuggestField(el);
+    } else if (action === 'fillForm') {
+      runFillFormHotkey().catch(err => showToast('Error filling fields: ' + (err && err.message || 'Unknown')));
+    }
+  }
+
+  // ── Chord: leader pressed → icons switch to "waiting for key" until the next key ──
+  const CHORD_ATTR = 'data-sf-chord';
+  let chordTimer = null;
+  let chordHint = null;
+
+  function chordActive() { return chordTimer !== null; }
+
+  // The ✨ icon nearest the focused field (or the first visible one) anchors the key hint.
+  function chordAnchorButton() {
+    const visible = formButtons.filter(({ btn }) => btn.style.display !== 'none');
+    if (!visible.length) return null;
+    const focus = document.activeElement;
+    const owner = focus && visible.find(({ target }) => target.contains && target.contains(focus));
+    return (owner || visible[0]).btn;
+  }
+
+  function startChord() {
+    const H = window.SFHotkeys;
+    cancelChord();
+    ensureBusyStyles();
+    formButtons.forEach(({ btn }) => {
+      btn.setAttribute(CHORD_ATTR, '');
+      btn.textContent = '⌨';
+      btn.title = 'SmartForm: waiting for the next key…';
+    });
+    chordHint = document.createElement('div');
+    chordHint.className = 'sf-chord-hint';
+    chordHint.setAttribute(SF_UI_ATTR, '');
+    chordHint.setAttribute('role', 'status');
+    const title = document.createElement('div');
+    title.className = 'sf-chord-title';
+    title.textContent = 'SmartForm — press a key';
+    chordHint.appendChild(title);
+    Object.keys(H.ACTIONS).forEach(action => {
+      const code = hotkeys.chord.keys[action];
+      if (!code) return;
+      const row = document.createElement('div');
+      const k = document.createElement('kbd'); k.textContent = H.chordKeyLabel(code);
+      row.appendChild(k); row.appendChild(document.createTextNode(' ' + H.ACTIONS[action].label));
+      chordHint.appendChild(row);
+    });
+    const esc = document.createElement('div');
+    const k = document.createElement('kbd'); k.textContent = 'Esc';
+    esc.appendChild(k); esc.appendChild(document.createTextNode(' Cancel'));
+    chordHint.appendChild(esc);
+    document.body.appendChild(chordHint);
+    const anchor = chordAnchorButton();
+    if (anchor) {
+      const r = anchor.getBoundingClientRect(), m = chordHint.getBoundingClientRect();
+      chordHint.style.top = Math.min(window.innerHeight - m.height - 8, r.bottom + 8) + 'px';
+      chordHint.style.left = Math.max(8, r.right - m.width) + 'px';
+    } else {
+      chordHint.style.bottom = '20px';
+      chordHint.style.right = '20px';
+    }
+    chordTimer = setTimeout(cancelChord, H.CHORD_TIMEOUT_MS);
+  }
+
+  function cancelChord() {
+    clearTimeout(chordTimer);
+    chordTimer = null;
+    if (chordHint) { chordHint.remove(); chordHint = null; }
+    formButtons.forEach(({ btn }) => {
+      if (!btn.hasAttribute(CHORD_ATTR)) return;
+      btn.removeAttribute(CHORD_ATTR);
+      btn.textContent = '✨';
+      btn.title = 'Scan this form with SmartForm Filler';
+    });
+  }
+
+  function onHotkey(e) {
+    if (!window.SFHotkeys) return;
+    const H = window.SFHotkeys;
+    const chord = hotkeys.chord || {};
+
+    if (chordActive()) {
+      if (/^(Control|Alt|Shift|Meta|OS)/.test(e.code)) return; // still releasing the leader
+      e.preventDefault(); e.stopPropagation();
+      if (e.repeat) return;
+      const action = Object.keys(H.ACTIONS).find(a => H.matchesChordKey(e, chord.keys[a]));
+      cancelChord();
+      if (action) runHotkeyAction(action);
+      else if (e.key !== 'Escape') showToast('SmartForm: no action on ' + (e.key || e.code));
+      return;
+    }
+    if (e.repeat) return;
+
+    if (chord.enabled && H.matches(e, chord.leader)) {
+      e.preventDefault(); e.stopPropagation();
+      startChord();
+    } else if (H.matches(e, hotkeys.fillField)) {
+      e.preventDefault(); e.stopPropagation();
+      runHotkeyAction('fillField');
     } else if (H.matches(e, hotkeys.fillForm)) {
       e.preventDefault(); e.stopPropagation();
-      runFillFormHotkey().catch(err => showToast('Error filling fields: ' + (err && err.message || 'Unknown')));
+      runHotkeyAction('fillForm');
     }
   }
 

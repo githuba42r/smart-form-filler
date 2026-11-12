@@ -469,6 +469,16 @@
       outline: 2px solid var(--primary); outline-offset: 1px;
     }
     .hotkey-btn.off { color: var(--text-subtle); font-style: italic; }
+    .hotkey-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .chord-box {
+      margin: 12px 0 16px; padding: 12px 16px;
+      background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px;
+    }
+    .chord-box .check-row {
+      display: flex; align-items: center; gap: 8px; margin: 0; cursor: pointer;
+    }
+    .chord-box .check-row input { width: 16px; height: 16px; margin: 0; }
+    #chordList.disabled .hk-name, #chordList.disabled .hk-help { opacity: 0.55; }
 
     /* Profiles list + editor (rows are built by the options script) */
     .profile-row {
@@ -584,6 +594,17 @@
       <p class="hint" style="margin-top: 0;">Click a shortcut, then press the new key combination (include Ctrl, Alt or ⌘).
         <kbd>Esc</kbd> cancels, <kbd>Backspace</kbd> turns the shortcut off. Changes apply to open tabs straight away.</p>
       <div id="hotkeyList"></div>
+
+      <div class="chord-box">
+        <label class="check-row" for="chordEnabled">
+          <input type="checkbox" id="chordEnabled">
+          <span>Use a chord (two-step shortcut)</span>
+        </label>
+        <p class="hint" style="margin: 2px 0 4px;">Press the leader keys, release them, then press a single key for the
+          action within 3 seconds — e.g. <kbd>Ctrl+Shift+F</kbd> then <kbd>S</kbd>.</p>
+        <div id="chordList"></div>
+      </div>
+
       <div class="row" style="align-items: center;">
         <button id="btnResetHotkeys" class="btn btn-secondary" type="button">Reset to defaults</button>
         <span id="hotkeyStatus" class="status" style="display: none; margin-top: 0;"></span>

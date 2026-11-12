@@ -353,6 +353,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   // Generic LLM proxy for content scripts (AI field detection)
+  if (msg.action === 'openOptions') {
+    chrome.runtime.openOptionsPage();
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (msg.action === 'formStatus') {
+    setTabFormStatus(sender && sender.tab && sender.tab.id, msg.count || 0);
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (msg.action === 'aiBusy') {
     setTabBusy(sender && sender.tab && sender.tab.id, !!msg.busy);
     sendResponse({ ok: true });
@@ -422,6 +434,26 @@ chrome.runtime.onInstalled.addListener((details) => {
     console.log('[SmartForm] Extension installed. Default Ollama config set.');
   }
 });
+
+// Toolbar icon colour: grey by default (manifest), full colour on tabs whose page
+// reports fillable fields ({action:'formStatus', count}).
+const ICON_IDLE = { 16: 'icons/icon-idle16.png', 32: 'icons/icon-idle32.png', 48: 'icons/icon-idle48.png' };
+const ICON_ACTIVE = { 16: 'icons/icon16.png', 32: 'icons/icon32.png', 48: 'icons/icon48.png' };
+function setTabFormStatus(tabId, count) {
+  if (!chrome.action || tabId == null) return;
+  chrome.action.setIcon({ tabId, path: count > 0 ? ICON_ACTIVE : ICON_IDLE }).catch(() => {});
+  if (!busyTimers.has(tabId)) {
+    chrome.action.setTitle({ tabId, title: count > 0
+      ? `SmartForm Filler — ${count} fillable field${count === 1 ? '' : 's'} on this page`
+      : 'SmartForm Filler — no fillable fields on this page' }).catch(() => {});
+  }
+}
+if (chrome.tabs && chrome.tabs.onUpdated) {
+  // New page load → back to grey until its content script reports fields.
+  chrome.tabs.onUpdated.addListener((tabId, info) => {
+    if (info.status === 'loading') setTabFormStatus(tabId, 0);
+  });
+}
 
 // Toolbar icon spinner while a tab's content script waits on the AI ({action:'aiBusy'}).
 const BUSY_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];

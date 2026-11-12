@@ -534,8 +534,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // ========== BEHAVIOR ==========
   // ========== KEYBOARD SHORTCUTS ==========
-  // Recorder for SFHotkeys combos; content.js picks changes up via storage.onChanged.
+  // Recorders for SFHotkeys combos (direct + chord); content.js picks changes up via storage.onChanged.
   const hotkeyList = document.getElementById('hotkeyList');
+  const chordList = document.getElementById('chordList');
+  const chordEnabled = document.getElementById('chordEnabled');
   const hotkeyStatus = document.getElementById('hotkeyStatus');
   const btnResetHotkeys = document.getElementById('btnResetHotkeys');
   let hotkeySettings = null;
@@ -556,57 +558,126 @@ document.addEventListener('DOMContentLoaded', async () => {
     renderHotkeys();
   }
 
+  function withChord(patch) {
+    return Object.assign({}, hotkeySettings, { chord: Object.assign({}, hotkeySettings.chord, patch) });
+  }
+
+  // Which setting already uses this combo (direct shortcuts + chord leader), excluding `self`.
+  function comboClash(combo, self) {
+    const H = SFHotkeys;
+    const owners = Object.keys(H.ACTIONS).map(a => ({ id: a, combo: hotkeySettings[a], name: H.ACTIONS[a].label }));
+    if (hotkeySettings.chord.enabled) owners.push({ id: 'leader', combo: hotkeySettings.chord.leader, name: 'Chord leader' });
+    const hit = owners.find(o => o.id !== self && H.same(o.combo, combo));
+    return hit ? hit.name : null;
+  }
+
+  function hotkeyRow(container, opts) {
+    const row = document.createElement('div');
+    row.className = 'hotkey-row';
+    const text = document.createElement('div');
+    const name = document.createElement('div'); name.className = 'hk-name'; name.textContent = opts.name;
+    const help = document.createElement('div'); help.className = 'hk-help'; help.textContent = opts.help;
+    text.appendChild(name); text.appendChild(help);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-secondary hotkey-btn' + (opts.value ? '' : ' off');
+    btn.setAttribute('data-hotkey', opts.id);
+    btn.textContent = opts.value || 'Off';
+    btn.title = opts.single ? 'Click, then press a single key' : 'Click, then press a new shortcut';
+    btn.disabled = !!opts.disabled;
+    btn.addEventListener('click', () => startRecording(btn, opts));
+    row.appendChild(text); row.appendChild(btn);
+    container.appendChild(row);
+  }
+
   function renderHotkeys() {
     if (!hotkeyList || typeof SFHotkeys === 'undefined') return;
+    const H = SFHotkeys, chord = hotkeySettings.chord;
     hotkeyList.innerHTML = '';
-    Object.keys(SFHotkeys.ACTIONS).forEach(action => {
-      const info = SFHotkeys.ACTIONS[action];
+    Object.keys(H.ACTIONS).forEach(action => {
       const combo = hotkeySettings[action];
-      const row = document.createElement('div');
-      row.className = 'hotkey-row';
-      const text = document.createElement('div');
-      const name = document.createElement('div'); name.className = 'hk-name'; name.textContent = info.label;
-      const help = document.createElement('div'); help.className = 'hk-help'; help.textContent = info.help;
-      text.appendChild(name); text.appendChild(help);
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'btn btn-secondary hotkey-btn' + (combo ? '' : ' off');
-      btn.setAttribute('data-hotkey', action);
-      btn.textContent = combo ? SFHotkeys.label(combo) : 'Off';
-      btn.title = 'Click, then press a new shortcut';
-      btn.addEventListener('click', () => startRecording(action, btn));
-      row.appendChild(text); row.appendChild(btn);
-      hotkeyList.appendChild(row);
+      hotkeyRow(hotkeyList, {
+        id: action, name: H.ACTIONS[action].label, help: H.ACTIONS[action].help,
+        value: combo ? H.label(combo) : '',
+        onCombo: (c) => {
+          const clash = comboClash(c, action);
+          if (clash) return H.label(c) + ' is already used for “' + clash + '”';
+          return saveHotkeys(Object.assign({}, hotkeySettings, { [action]: c }));
+        },
+        onClear: () => saveHotkeys(Object.assign({}, hotkeySettings, { [action]: null }))
+      });
+    });
+
+    if (!chordList) return;
+    if (chordEnabled) chordEnabled.checked = chord.enabled;
+    chordList.innerHTML = '';
+    chordList.classList.toggle('disabled', !chord.enabled);
+    hotkeyRow(chordList, {
+      id: 'leader', name: 'Chord leader', disabled: !chord.enabled,
+      help: 'Press this first — the ✨ form icon turns amber and waits for the next key.',
+      value: chord.leader ? H.label(chord.leader) : '',
+      onCombo: (c) => {
+        const clash = comboClash(c, 'leader');
+        if (clash) return H.label(c) + ' is already used for “' + clash + '”';
+        return saveHotkeys(withChord({ leader: c }));
+      },
+      onClear: () => saveHotkeys(withChord({ leader: null }))
+    });
+    Object.keys(H.ACTIONS).forEach(action => {
+      const code = chord.keys[action];
+      hotkeyRow(chordList, {
+        id: 'chord-' + action, single: true, disabled: !chord.enabled,
+        name: 'then ' + H.ACTIONS[action].label,
+        help: 'Single key pressed after the leader.',
+        value: code ? (chord.leader ? H.label(chord.leader) + ' → ' : '') + H.chordKeyLabel(code) : '',
+        onKey: (k) => {
+          const other = Object.keys(chord.keys).find(a => a !== action && chord.keys[a] === k);
+          if (other) return H.chordKeyLabel(k) + ' is already used for “' + H.ACTIONS[other].label + '”';
+          return saveHotkeys(withChord({ keys: Object.assign({}, chord.keys, { [action]: k }) }));
+        },
+        onClear: () => saveHotkeys(withChord({ keys: Object.assign({}, chord.keys, { [action]: null }) }))
+      });
     });
   }
 
-  function startRecording(action, btn) {
+  // opts.single → record one plain key (chord step); otherwise a modifier combo.
+  // onCombo/onKey return an error string to reject, or a promise once saved.
+  function startRecording(btn, opts) {
     if (stopRecording) stopRecording();
     btn.classList.add('recording');
-    btn.textContent = 'Press keys…';
+    btn.textContent = opts.single ? 'Press a key…' : 'Press keys…';
     const onKey = async (e) => {
       e.preventDefault(); e.stopPropagation();
       if (e.key === 'Escape') { stop(); renderHotkeys(); return; }
       if (e.key === 'Backspace' || e.key === 'Delete') {
         stop();
-        await saveHotkeys(Object.assign({}, hotkeySettings, { [action]: null }));
-        showHotkeyStatus(SFHotkeys.ACTIONS[action].label + ' shortcut turned off', 'info');
+        await opts.onClear();
+        showHotkeyStatus(opts.name + ' turned off', 'info');
         return;
       }
-      const combo = SFHotkeys.fromEvent(e);
-      if (!combo) { btn.textContent = SFHotkeys.label({ ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey, code: '…' }); return; }
-      if (!SFHotkeys.isValid(combo)) {
-        showHotkeyStatus('Include Ctrl, Alt or ⌘ (or use F1–F24) so typing isn’t hijacked', 'error');
-        return;
+      let result, shown;
+      if (opts.single) {
+        if (/^(Control|Alt|Shift|Meta|OS)/.test(e.code)) return;
+        if (e.ctrlKey || e.altKey || e.metaKey || !SFHotkeys.isValidChordKey(e.code)) {
+          showHotkeyStatus('Use a single letter, digit or F-key with no modifiers', 'error');
+          return;
+        }
+        shown = SFHotkeys.chordKeyLabel(e.code);
+        result = opts.onKey(e.code);
+      } else {
+        const combo = SFHotkeys.fromEvent(e);
+        if (!combo) { btn.textContent = SFHotkeys.label({ ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey, code: '…' }); return; }
+        if (!SFHotkeys.isValid(combo)) {
+          showHotkeyStatus('Include Ctrl, Alt or ⌘ (or use F1–F24) so typing isn’t hijacked', 'error');
+          return;
+        }
+        shown = SFHotkeys.label(combo);
+        result = opts.onCombo(combo);
       }
-      const clash = Object.keys(hotkeySettings).find(k => k !== action && SFHotkeys.same(hotkeySettings[k], combo));
-      if (clash) {
-        showHotkeyStatus(SFHotkeys.label(combo) + ' is already used for “' + SFHotkeys.ACTIONS[clash].label + '”', 'error');
-        return;
-      }
+      if (typeof result === 'string') { showHotkeyStatus(result, 'error'); return; }
       stop();
-      await saveHotkeys(Object.assign({}, hotkeySettings, { [action]: combo }));
-      showHotkeyStatus(SFHotkeys.ACTIONS[action].label + ': ' + SFHotkeys.label(combo), 'success');
+      await result;
+      showHotkeyStatus(opts.name + ': ' + shown, 'success');
     };
     const onBlur = () => { stop(); renderHotkeys(); };
     function stop() {
@@ -619,6 +690,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     btn.addEventListener('blur', onBlur);
     stopRecording = stop;
   }
+
+  if (chordEnabled) chordEnabled.addEventListener('change', async () => {
+    const enabled = chordEnabled.checked;
+    if (enabled && hotkeySettings.chord.leader) {
+      const clash = Object.keys(SFHotkeys.ACTIONS).find(a => SFHotkeys.same(hotkeySettings[a], hotkeySettings.chord.leader));
+      if (clash) {
+        chordEnabled.checked = false;
+        showHotkeyStatus('Chord leader ' + SFHotkeys.label(hotkeySettings.chord.leader) + ' clashes with “' +
+          SFHotkeys.ACTIONS[clash].label + '” — change one first', 'error');
+        return;
+      }
+    }
+    await saveHotkeys(withChord({ enabled }));
+    showHotkeyStatus(enabled ? 'Chord shortcut enabled' : 'Chord shortcut disabled', 'info');
+  });
 
   if (btnResetHotkeys) btnResetHotkeys.addEventListener('click', async () => {
     if (stopRecording) stopRecording();

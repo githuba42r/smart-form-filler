@@ -14,6 +14,13 @@
     fillForm:  { ctrl: false, alt: true, shift: true, meta: false, code: 'KeyF' },
     fillField: { ctrl: false, alt: true, shift: true, meta: false, code: 'KeyS' }
   };
+  // Chord: press the leader combo, release, then one plain key picks the action.
+  var CHORD_DEFAULTS = {
+    enabled: false,
+    leader: { ctrl: true, alt: false, shift: true, meta: false, code: 'KeyF' },
+    keys: { fillForm: 'KeyF', fillField: 'KeyS' }
+  };
+  var CHORD_TIMEOUT_MS = 3000;
   var MODIFIER_CODES = /^(Control|Alt|Shift|Meta|OS)(Left|Right)?$/;
 
   var isMac = /Mac|iPhone|iPad/.test((root.navigator && (root.navigator.platform || root.navigator.userAgent)) || '');
@@ -60,17 +67,37 @@
     return parts.join(isMac ? '' : '+');
   }
 
+  // Second key of a chord: a letter, digit or function key with no modifiers.
+  function isValidChordKey(code) {
+    return /^(Key[A-Z]|Digit\d|F([1-9]|1[0-9]|2[0-4]))$/.test(code || '');
+  }
+
+  // Plain key press (Shift tolerated) matching a chord's second key.
+  function matchesChordKey(e, code) {
+    return !!code && !!e && e.code === code && !e.ctrlKey && !e.altKey && !e.metaKey;
+  }
+
+  function chordKeyLabel(code) { return code ? keyLabel(code) : '—'; }
+
   // Stored settings merged over defaults. A stored null means "disabled".
   function resolve(stored) {
     var out = {};
     Object.keys(DEFAULTS).forEach(function (k) {
       out[k] = stored && Object.prototype.hasOwnProperty.call(stored, k) ? stored[k] : DEFAULTS[k];
     });
+    var c = (stored && stored.chord) || {};
+    out.chord = {
+      enabled: !!c.enabled,
+      leader: Object.prototype.hasOwnProperty.call(c, 'leader') ? c.leader : CHORD_DEFAULTS.leader,
+      keys: Object.assign({}, CHORD_DEFAULTS.keys, c.keys || {})
+    };
     return out;
   }
 
   root.SFHotkeys = {
     STORAGE_KEY: STORAGE_KEY, ACTIONS: ACTIONS, DEFAULTS: DEFAULTS,
-    fromEvent: fromEvent, isValid: isValid, same: same, matches: matches, label: label, resolve: resolve
+    CHORD_DEFAULTS: CHORD_DEFAULTS, CHORD_TIMEOUT_MS: CHORD_TIMEOUT_MS,
+    fromEvent: fromEvent, isValid: isValid, same: same, matches: matches, label: label, resolve: resolve,
+    isValidChordKey: isValidChordKey, matchesChordKey: matchesChordKey, chordKeyLabel: chordKeyLabel
   };
 })(typeof window !== 'undefined' ? window : globalThis);

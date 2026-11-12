@@ -4,6 +4,9 @@
  */
 
 document.addEventListener('DOMContentLoaded', async () => {
+  const btnSettings = document.getElementById('btnSettings');
+  if (btnSettings) btnSettings.addEventListener('click', () => { chrome.runtime.openOptionsPage(); window.close(); });
+
   const statusBar = document.getElementById('statusBar');
   const statusText = document.getElementById('statusText');
   const statusDot = statusBar.querySelector('.dot');
