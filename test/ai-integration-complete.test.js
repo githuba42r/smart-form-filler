@@ -30,6 +30,6 @@ const sku = F.generateCustomFieldValue('sku');
 ok(/^[A-Z]{3}-\d{5}$/.test(sku), `Custom SKU generator works: ${sku}`);
 
 const fallback = F.generateCustomFieldValue('unknown_custom_type');
-ok(fallback.startsWith('text_'), `Fallback generator works: ${fallback}`);
+eq(fallback, '', 'Unknown type has no local generator (AI chooses at fill time)');
 
 done('ai-integration-complete');

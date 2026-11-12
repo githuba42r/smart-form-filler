@@ -10,6 +10,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   const providerRadios = document.querySelectorAll('input[name="provider"]');
   const ollamaSettings = document.getElementById('ollamaSettings');
   const openrouterSettings = document.getElementById('openrouterSettings');
+  const anthropicSettings = document.getElementById('anthropicSettings');
+  const openaiSettings = document.getElementById('openaiSettings');
 
   // Ollama elements
   const ollamaUrlInput = document.getElementById('ollamaUrl');
@@ -21,9 +23,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   // OpenRouter elements
   const openrouterStatus = document.getElementById('openrouterStatus');
   const btnConnectOpenRouter = document.getElementById('btnConnectOpenRouter');
-  const btnBrowseModels = document.getElementById('btnBrowseModels');
-  const openrouterApiKeyInput = document.getElementById('openrouterApiKey');
-  const btnSaveOpenRouterKey = document.getElementById('btnSaveOpenRouterKey');
   const currentOpenRouterModel = document.getElementById('currentOpenRouterModel');
   const currentModelCard = document.getElementById('currentModelCard');
 
@@ -55,7 +54,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Fetch the public OpenRouter model list (no API key required), cached per session.
   async function fetchOpenRouterModels() {
     if (modelsCache) return modelsCache;
-    const apiKey = (openrouterApiKeyInput && openrouterApiKeyInput.value.trim()) || currentSettings.openrouterApiKey;
+    const apiKey = currentSettings.openrouterApiKey;
     const headers = {
       'HTTP-Referer': 'https://smartform-filler.dev',
       'X-Title': 'SmartForm Filler Extension'
@@ -114,6 +113,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       'provider',
       'ollamaUrl', 'ollamaModel',
       'openrouterApiKey', 'openrouterModel',
+      'anthropicApiKey', 'anthropicModel',
+      'openaiApiKey', 'openaiModel',
       'defaultProfile'
     ]);
 
@@ -129,7 +130,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // OpenRouter
     if (currentSettings.openrouterApiKey) {
-      openrouterApiKeyInput.value = currentSettings.openrouterApiKey;
       updateOpenRouterStatus(true);
     } else {
       updateOpenRouterStatus(false);
@@ -145,6 +145,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     showCurrentOpenRouterModel(currentSettings.openrouterModel);
 
+    // Anthropic / OpenAI: show the masked saved key and load the live model list.
+    CLOUD_PROVIDERS.forEach(cfg => initCloudProvider(cfg));
+
     // Behavior
     if (currentSettings.defaultProfile) defaultProfileSelect.value = currentSettings.defaultProfile;
   }
@@ -159,6 +162,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Show/hide settings panels
     if (ollamaSettings) ollamaSettings.style.display = (provider === 'ollama') ? 'block' : 'none';
     if (openrouterSettings) openrouterSettings.style.display = (provider === 'openrouter') ? 'block' : 'none';
+    if (anthropicSettings) anthropicSettings.style.display = (provider === 'anthropic') ? 'block' : 'none';
+    if (openaiSettings) openaiSettings.style.display = (provider === 'openai') ? 'block' : 'none';
+  }
+
+  // Check a provider radio and show its card (used after saving a key).
+  async function selectProvider(provider) {
+    const r = document.getElementById(`provider-${provider}`);
+    if (r) r.checked = true;
+    currentSettings.provider = provider;
+    await chrome.storage.local.set({ provider });
+    updateProviderUI(provider);
   }
 
   // Provider radio change
@@ -171,15 +185,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // Make the whole label clickable
-  const ollamaLabel = document.getElementById('provider-ollama-label');
-  const openrouterLabel = document.getElementById('provider-openrouter-label');
-  if (ollamaLabel) ollamaLabel.addEventListener('click', () => {
-    const r = document.getElementById('provider-ollama');
-    if (r) { r.checked = true; r.dispatchEvent(new Event('change')); }
-  });
-  if (openrouterLabel) openrouterLabel.addEventListener('click', () => {
-    const r = document.getElementById('provider-openrouter');
-    if (r) { r.checked = true; r.dispatchEvent(new Event('change')); }
+  ['ollama', 'openrouter', 'anthropic', 'openai'].forEach(p => {
+    const label = document.getElementById(`provider-${p}-label`);
+    if (label) label.addEventListener('click', () => {
+      const r = document.getElementById(`provider-${p}`);
+      if (r) { r.checked = true; r.dispatchEvent(new Event('change')); }
+    });
   });
 
   // ========== OLLAMA ==========
@@ -229,7 +240,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       openrouterStatus.textContent = `✅ Connected to OpenRouter ${message ? '• ' + message : ''}`;
       openrouterStatus.className = 'status success';
     } else {
-      openrouterStatus.textContent = '⚠️ Not connected — please authenticate or paste an API key';
+      openrouterStatus.textContent = '⚠️ Not connected — authenticate with OpenRouter to continue';
       openrouterStatus.className = 'status info';
     }
     openrouterStatus.style.display = 'block';
@@ -249,7 +260,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     return { ...m, _reasons: reasons, _free: free };
   }
 
-  // Render the currently selected model as a full card under the Browse button.
+  // Render the currently selected model as a full card; clicking it opens the picker.
   function showCurrentOpenRouterModel(modelId) {
     if (!currentOpenRouterModel || !currentModelCard) return;
     // Always show a model — fall back to the default. Guarded so a load issue
@@ -273,8 +284,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!currentModelCard) return;
     currentModelCard.innerHTML = '';
     const card = createModelCard(model, { selected: true });
-    card.title = 'Click to change model';
-    card.addEventListener('click', () => { if (btnBrowseModels) btnBrowseModels.click(); });
+    card.title = 'Click to choose a different model';
+    card.setAttribute('role', 'button');
+    card.setAttribute('tabindex', '0');
+    card.setAttribute('aria-describedby', 'currentModelHelp');
+    card.addEventListener('click', openModelPicker);
+    card.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openModelPicker(); }
+    });
     currentModelCard.appendChild(card);
   }
 
@@ -343,16 +360,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       await chrome.storage.local.set({ openrouterApiKey: key, provider: 'openrouter' });
       currentSettings.openrouterApiKey = key;
-      openrouterApiKeyInput.value = key;
       updateOpenRouterStatus(true, 'Authenticated via OAuth');
 
       const r = document.getElementById('provider-openrouter');
       if (r) { r.checked = true; r.dispatchEvent(new Event('change')); }
     } catch (err) {
       console.error(err);
-      openrouterStatus.textContent = `OAuth flow failed: ${err.message}. You can paste an API key manually below.`;
+      openrouterStatus.textContent = `OAuth flow failed: ${err.message}. Please try authenticating again.`;
       openrouterStatus.className = 'status error';
-      chrome.tabs.create({ url: 'https://openrouter.ai/keys' });
     }
   });
 
@@ -370,16 +385,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
 
-  if (btnSaveOpenRouterKey) btnSaveOpenRouterKey.addEventListener('click', async () => {
-    const key = openrouterApiKeyInput.value.trim();
-    if (!key) { alert('Please enter an API key'); return; }
-    await chrome.storage.local.set({ openrouterApiKey: key, provider: 'openrouter' });
-    updateOpenRouterStatus(true, 'Key saved');
-    const r = document.getElementById('provider-openrouter');
-    if (r) { r.checked = true; r.dispatchEvent(new Event('change')); }
-  });
-
-  if (btnBrowseModels) btnBrowseModels.addEventListener('click', async () => {
+  // Open the model picker (triggered by clicking the selected-model card).
+  async function openModelPicker() {
     // The models list endpoint is public — no API key required to browse it.
     if (!modelModal) return;
 
@@ -452,7 +459,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         modelsError.textContent = `Failed to load models: ${err.message}`;
       }
     }
-  });
+  }
 
   // Highlight which segmented button is active for a given filter value.
   function activateSeg(seg, value) {
@@ -540,7 +547,392 @@ document.addEventListener('DOMContentLoaded', async () => {
   wireSeg(segCost, 'cost');
   wireSeg(segQuality, 'quality');
 
+  // ========== ANTHROPIC + OPENAI (API key) ==========
+  // Both cards share one wiring: key input + show/hide + Save Key, and a model
+  // <select> filled live from the provider's models API (SFCloudProviders).
+  const CLOUD_PROVIDERS = [
+    { id: 'anthropic', name: 'Anthropic', keyField: 'anthropicApiKey', modelField: 'anthropicModel' },
+    { id: 'openai', name: 'OpenAI', keyField: 'openaiApiKey', modelField: 'openaiModel' }
+  ];
+
+  function showCloudStatus(el, text, kind, hideAfterMs) {
+    if (!el) return;
+    clearTimeout(el._hideTimer);
+    el.textContent = text;
+    el.className = `status cloud-status ${kind}`;
+    el.style.display = 'block';
+    if (hideAfterMs) el._hideTimer = setTimeout(() => { el.style.display = 'none'; }, hideAfterMs);
+  }
+
+  function cloudEls(cfg) {
+    const N = cfg.name;
+    return {
+      keyInput: document.getElementById(`${cfg.id}ApiKey`),
+      keyState: document.getElementById(`${cfg.id}KeyState`),
+      keyStatus: document.getElementById(`${cfg.id}KeyStatus`),
+      btnToggle: document.getElementById(`btnToggle${N}Key`),
+      btnSave: document.getElementById(`btnSave${N}Key`),
+      select: document.getElementById(`${cfg.id}Model`),
+      btnLoad: document.getElementById(`btnLoad${N}Models`),
+      modelStatus: document.getElementById(`${cfg.id}ModelStatus`)
+    };
+  }
+
+  function renderKeyState(cfg, els) {
+    if (!els.keyState) return;
+    const key = currentSettings[cfg.keyField];
+    els.keyState.textContent = key
+      ? `✅ Key saved (${SFCloudProviders.maskKey(key)})`
+      : 'No key saved.';
+    if (els.keyInput) {
+      els.keyInput.placeholder = key ? `${SFCloudProviders.maskKey(key)} — paste a new key to replace` : (cfg.id === 'anthropic' ? 'sk-ant-…' : 'sk-…');
+    }
+  }
+
+  function setSelectPlaceholder(select, text) {
+    select.innerHTML = '';
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = text;
+    select.appendChild(opt);
+  }
+
+  async function loadCloudModels(cfg, els) {
+    if (!els.select) return;
+    const key = (els.keyInput && els.keyInput.value.trim()) || currentSettings[cfg.keyField];
+    if (!key) {
+      setSelectPlaceholder(els.select, 'Save an API key to load models');
+      els.select.disabled = true;
+      showCloudStatus(els.modelStatus, `Enter and save your ${cfg.name} API key first.`, 'info');
+      return;
+    }
+
+    els.select.disabled = true;
+    if (els.btnLoad) els.btnLoad.disabled = true;
+    setSelectPlaceholder(els.select, 'Loading models…');
+    showCloudStatus(els.modelStatus, `Loading models from ${cfg.name}…`, 'info');
+
+    try {
+      const models = await SFCloudProviders.fetchModels(cfg.id, key);
+      const saved = currentSettings[cfg.modelField] || '';
+      const selected = SFCloudProviders.pickDefaultModel(cfg.id, models, saved);
+
+      els.select.innerHTML = '';
+      if (!selected) {
+        const ph = document.createElement('option');
+        ph.value = '';
+        ph.textContent = '— Select a model —';
+        els.select.appendChild(ph);
+      }
+      if (saved && !models.some(m => m.id === saved)) {
+        const missing = document.createElement('option');
+        missing.value = saved;
+        missing.textContent = `${saved} (saved; not in the current list)`;
+        els.select.appendChild(missing);
+      }
+      models.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = m.label;
+        els.select.appendChild(opt);
+      });
+      els.select.value = selected;
+      els.select.disabled = false;
+
+      // Persist an automatic preselection (Anthropic only) so the background
+      // worker uses what the page shows.
+      if (selected && selected !== saved) {
+        currentSettings[cfg.modelField] = selected;
+        await chrome.storage.local.set({ [cfg.modelField]: selected });
+      }
+
+      if (!models.length) {
+        showCloudStatus(els.modelStatus, `No usable models returned by ${cfg.name} for this key.`, 'error');
+      } else {
+        showCloudStatus(els.modelStatus,
+          `✅ Loaded ${models.length} model${models.length === 1 ? '' : 's'}${selected ? '' : ' — pick one to use'}.`,
+          'success', selected ? 2500 : 0);
+      }
+    } catch (err) {
+      setSelectPlaceholder(els.select, 'Models unavailable');
+      els.select.disabled = true;
+      showCloudStatus(els.modelStatus, `❌ ${SFCloudProviders.describeError(err)}`, 'error');
+    } finally {
+      if (els.btnLoad) els.btnLoad.disabled = false;
+    }
+  }
+
+  function wireCloudProvider(cfg) {
+    const els = cloudEls(cfg);
+    cfg.els = els;
+
+    if (els.btnToggle && els.keyInput) els.btnToggle.addEventListener('click', () => {
+      const show = els.keyInput.type === 'password';
+      els.keyInput.type = show ? 'text' : 'password';
+      els.btnToggle.textContent = show ? 'Hide' : 'Show';
+      els.btnToggle.setAttribute('aria-pressed', String(show));
+    });
+
+    if (els.btnSave) els.btnSave.addEventListener('click', async () => {
+      const key = els.keyInput ? els.keyInput.value.trim() : '';
+      if (!key) {
+        showCloudStatus(els.keyStatus, `Paste your ${cfg.name} API key first.`, 'error');
+        return;
+      }
+      currentSettings[cfg.keyField] = key;
+      await chrome.storage.local.set({ [cfg.keyField]: key });
+      await selectProvider(cfg.id);
+      els.keyInput.value = '';
+      els.keyInput.type = 'password';
+      if (els.btnToggle) { els.btnToggle.textContent = 'Show'; els.btnToggle.setAttribute('aria-pressed', 'false'); }
+      renderKeyState(cfg, els);
+      showCloudStatus(els.keyStatus, `✅ ${cfg.name} key saved. ${cfg.name} is now the active provider.`, 'success', 3000);
+      await loadCloudModels(cfg, els);
+    });
+
+    if (els.btnLoad) els.btnLoad.addEventListener('click', () => loadCloudModels(cfg, els));
+
+    if (els.select) els.select.addEventListener('change', async () => {
+      const model = els.select.value;
+      if (!model) return;
+      currentSettings[cfg.modelField] = model;
+      await chrome.storage.local.set({ [cfg.modelField]: model });
+      showCloudStatus(els.modelStatus, `✅ Model saved: ${model}`, 'success', 2000);
+    });
+  }
+
+  function initCloudProvider(cfg) {
+    const els = cfg.els || cloudEls(cfg);
+    renderKeyState(cfg, els);
+    // Don't block the rest of page boot on a network call.
+    if (currentSettings[cfg.keyField]) loadCloudModels(cfg, els);
+  }
+
+  if (typeof SFCloudProviders !== 'undefined') {
+    CLOUD_PROVIDERS.forEach(wireCloudProvider);
+  } else {
+    CLOUD_PROVIDERS.length = 0; // helper script missing: leave the cards inert
+  }
+
   // ========== BEHAVIOR ==========
+  // ========== KEYBOARD SHORTCUTS ==========
+  // Recorders for SFHotkeys combos (direct + chord); content.js picks changes up via storage.onChanged.
+  const hotkeyList = document.getElementById('hotkeyList');
+  const chordList = document.getElementById('chordList');
+  const chordEnabled = document.getElementById('chordEnabled');
+  const hotkeyStatus = document.getElementById('hotkeyStatus');
+  const btnResetHotkeys = document.getElementById('btnResetHotkeys');
+  let hotkeySettings = null;
+  let stopRecording = null;
+
+  function showHotkeyStatus(text, kind) {
+    if (!hotkeyStatus) return;
+    hotkeyStatus.textContent = text;
+    hotkeyStatus.className = 'status ' + kind;
+    hotkeyStatus.style.display = 'inline-block';
+    clearTimeout(showHotkeyStatus._t);
+    showHotkeyStatus._t = setTimeout(() => { hotkeyStatus.style.display = 'none'; }, 3500);
+  }
+
+  async function saveHotkeys(next) {
+    hotkeySettings = next;
+    await chrome.storage.local.set({ [SFHotkeys.STORAGE_KEY]: next });
+    renderHotkeys();
+  }
+
+  function withChord(patch) {
+    return Object.assign({}, hotkeySettings, { chord: Object.assign({}, hotkeySettings.chord, patch) });
+  }
+
+  // Which setting already uses this combo (direct shortcuts + chord leader), excluding `self`.
+  function comboClash(combo, self) {
+    const H = SFHotkeys;
+    const owners = Object.keys(H.ACTIONS).map(a => ({ id: a, combo: hotkeySettings[a], name: H.ACTIONS[a].label }));
+    if (hotkeySettings.chord.enabled) owners.push({ id: 'leader', combo: hotkeySettings.chord.leader, name: 'Chord leader' });
+    const hit = owners.find(o => o.id !== self && H.same(o.combo, combo));
+    return hit ? hit.name : null;
+  }
+
+  function hotkeyRow(container, opts) {
+    const row = document.createElement('div');
+    row.className = 'hotkey-row';
+    const text = document.createElement('div');
+    const name = document.createElement('div'); name.className = 'hk-name'; name.textContent = opts.name;
+    const help = document.createElement('div'); help.className = 'hk-help'; help.textContent = opts.help;
+    text.appendChild(name); text.appendChild(help);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-secondary hotkey-btn' + (opts.value ? '' : ' off');
+    btn.setAttribute('data-hotkey', opts.id);
+    btn.textContent = opts.value || opts.emptyText || 'Off';
+    if (opts.combo && SFHotkeys.browserConflict(opts.combo)) {
+      const warn = document.createElement('div');
+      warn.className = 'hk-warn';
+      warn.textContent = '⚠ ' + SFHotkeys.conflictMessage(opts.combo);
+      text.appendChild(warn);
+    }
+    btn.title = opts.single ? 'Click, then press a single key' : 'Click, then press a new shortcut';
+    btn.disabled = !!opts.disabled;
+    btn.addEventListener('click', () => startRecording(btn, opts));
+    if (opts.autoRecord) setTimeout(() => { btn.focus(); startRecording(btn, opts); }, 0);
+    row.appendChild(text); row.appendChild(btn);
+    container.appendChild(row);
+  }
+
+  function renderHotkeys() {
+    if (!hotkeyList || typeof SFHotkeys === 'undefined') return;
+    const H = SFHotkeys, chord = hotkeySettings.chord;
+    hotkeyList.innerHTML = '';
+    Object.keys(H.ACTIONS).forEach(action => {
+      const combo = hotkeySettings[action];
+      hotkeyRow(hotkeyList, {
+        id: action, name: H.ACTIONS[action].label, help: H.ACTIONS[action].help,
+        value: combo ? H.label(combo) : '', combo,
+        onCombo: (c) => {
+          const clash = comboClash(c, action);
+          if (clash) return H.label(c) + ' is already used for “' + clash + '”';
+          return saveHotkeys(Object.assign({}, hotkeySettings, { [action]: c }));
+        },
+        onClear: () => saveHotkeys(Object.assign({}, hotkeySettings, { [action]: null }))
+      });
+    });
+
+    if (!chordList) return;
+    const pending = renderHotkeys.pendingLeader;
+    renderHotkeys.pendingLeader = false;
+    const active = chord.enabled || pending;
+    if (chordEnabled) chordEnabled.checked = active;
+    chordList.innerHTML = '';
+    chordList.classList.toggle('disabled', !active);
+    hotkeyRow(chordList, {
+      id: 'leader', name: 'Chord leader', disabled: !active, autoRecord: pending,
+      help: 'Press this first — the ✨ form icon turns amber and waits for the next key.',
+      value: chord.leader ? H.label(chord.leader) : '', combo: chord.leader,
+      emptyText: 'Not set',
+      onCombo: (c) => {
+        const clash = comboClash(c, 'leader');
+        if (clash) return H.label(c) + ' is already used for “' + clash + '”';
+        return saveHotkeys(withChord({ leader: c, enabled: true }));
+      },
+      // No leader → no chord.
+      onClear: () => saveHotkeys(withChord({ leader: null, enabled: false }))
+    });
+    Object.keys(H.ACTIONS).forEach(action => {
+      const code = chord.keys[action];
+      hotkeyRow(chordList, {
+        id: 'chord-' + action, single: true, disabled: !chord.enabled,
+        name: 'then ' + H.ACTIONS[action].label,
+        help: chord.leader ? 'Key pressed after ' + H.label(chord.leader) + '.' : 'Key pressed after the leader.',
+        value: code ? H.chordKeyLabel(code) : '',
+        onKey: (k) => {
+          const other = Object.keys(chord.keys).find(a => a !== action && chord.keys[a] === k);
+          if (other) return H.chordKeyLabel(k) + ' is already used for “' + H.ACTIONS[other].label + '”';
+          return saveHotkeys(withChord({ keys: Object.assign({}, chord.keys, { [action]: k }) }));
+        },
+        onClear: () => saveHotkeys(withChord({ keys: Object.assign({}, chord.keys, { [action]: null }) }))
+      });
+    });
+  }
+
+  // opts.single → record one plain key (chord step); otherwise a modifier combo.
+  // onCombo/onKey return an error string to reject, or a promise once saved.
+  function startRecording(btn, opts) {
+    if (stopRecording) stopRecording();
+    btn.classList.add('recording');
+    btn.textContent = opts.single ? 'Press a key…' : 'Press keys…';
+    const onKey = async (e) => {
+      e.preventDefault(); e.stopPropagation();
+      if (e.key === 'Escape') { stop(); renderHotkeys(); return; }
+      if (e.key === 'Backspace' || e.key === 'Delete') {
+        stop();
+        await opts.onClear();
+        showHotkeyStatus(opts.name + ' turned off', 'info');
+        return;
+      }
+      let result, shown;
+      if (opts.single) {
+        if (/^(Control|Alt|Shift|Meta|OS)/.test(e.code)) return;
+        if (e.ctrlKey || e.altKey || e.metaKey || !SFHotkeys.isValidChordKey(e.code)) {
+          showHotkeyStatus('Use a single letter, digit or F-key with no modifiers', 'error');
+          return;
+        }
+        shown = SFHotkeys.chordKeyLabel(e.code);
+        result = opts.onKey(e.code);
+      } else {
+        const combo = SFHotkeys.fromEvent(e);
+        if (!combo) { btn.textContent = SFHotkeys.label({ ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey, code: '…' }); return; }
+        if (!SFHotkeys.isValid(combo)) {
+          showHotkeyStatus('Include Ctrl, Alt or ⌘ (or use F1–F24) so typing isn’t hijacked', 'error');
+          return;
+        }
+        const browserClash = SFHotkeys.conflictMessage(combo);
+        if (browserClash) { showHotkeyStatus(browserClash, 'error'); return; }
+        shown = SFHotkeys.label(combo);
+        result = opts.onCombo(combo);
+        if (typeof result !== 'string' && SFHotkeys.riskyCombo(combo)) {
+          await result;
+          stop();
+          showHotkeyStatus(opts.name + ': ' + shown + ' — note Ctrl+Alt combos are often taken by the desktop ' +
+            '(and are AltGr on Windows); if it doesn’t fire, choose another', 'info');
+          return;
+        }
+      }
+      if (typeof result === 'string') { showHotkeyStatus(result, 'error'); return; }
+      stop();
+      await result;
+      showHotkeyStatus(opts.name + ': ' + shown, 'success');
+    };
+    const onBlur = () => { stop(); renderHotkeys(); };
+    function stop() {
+      window.removeEventListener('keydown', onKey, true);
+      btn.removeEventListener('blur', onBlur);
+      btn.classList.remove('recording');
+      stopRecording = null;
+    }
+    window.addEventListener('keydown', onKey, true);
+    btn.addEventListener('blur', onBlur);
+    stopRecording = stop;
+  }
+
+  if (chordEnabled) chordEnabled.addEventListener('change', async () => {
+    const enabled = chordEnabled.checked;
+    if (enabled && !hotkeySettings.chord.leader) {
+      // Choose the leader first; the chord is saved as enabled once it's recorded.
+      renderChordPendingLeader();
+      showHotkeyStatus('Press the chord keys, e.g. Ctrl+Shift+F', 'info');
+      return;
+    }
+    if (enabled && hotkeySettings.chord.leader) {
+      const clash = Object.keys(SFHotkeys.ACTIONS).find(a => SFHotkeys.same(hotkeySettings[a], hotkeySettings.chord.leader));
+      if (clash) {
+        chordEnabled.checked = false;
+        showHotkeyStatus('Chord leader ' + SFHotkeys.label(hotkeySettings.chord.leader) + ' clashes with “' +
+          SFHotkeys.ACTIONS[clash].label + '” — change one first', 'error');
+        return;
+      }
+    }
+    await saveHotkeys(withChord({ enabled }));
+    showHotkeyStatus(enabled ? 'Chord shortcut enabled' : 'Chord shortcut disabled', 'info');
+  });
+
+  function renderChordPendingLeader() {
+    renderHotkeys.pendingLeader = true;
+    renderHotkeys();
+  }
+
+  if (btnResetHotkeys) btnResetHotkeys.addEventListener('click', async () => {
+    if (stopRecording) stopRecording();
+    await saveHotkeys(SFHotkeys.resolve(null));
+    showHotkeyStatus('Shortcuts reset to defaults', 'success');
+  });
+
+  (async function initHotkeys() {
+    if (typeof SFHotkeys === 'undefined') return;
+    const stored = await chrome.storage.local.get([SFHotkeys.STORAGE_KEY]);
+    hotkeySettings = SFHotkeys.resolve(stored[SFHotkeys.STORAGE_KEY]);
+    renderHotkeys();
+  })();
+
   if (btnSaveBehavior) btnSaveBehavior.addEventListener('click', async () => {
     await chrome.storage.local.set({ defaultProfile: defaultProfileSelect.value });
     const status = document.createElement('div');
@@ -576,7 +968,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     profiles.forEach(profile => {
       const li = document.createElement('li');
-      li.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding: 12px; margin-bottom: 8px; background: #f1f5f9; border-radius: 8px; gap: 8px;';
+      li.className = 'profile-row';
 
       const nameBtn = document.createElement('button');
       nameBtn.textContent = profile.label || profile.id;
@@ -614,7 +1006,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       deleteBtn.textContent = 'Delete';
       deleteBtn.className = 'btn btn-secondary';
       deleteBtn.style.fontSize = '12px';
-      deleteBtn.style.color = '#991b1b';
+      deleteBtn.style.color = 'var(--danger)';
       deleteBtn.addEventListener('click', async () => {
         if (confirm(`Delete "${profile.label || profile.id}"?`)) {
           profiles = SFFormData.profilesDelete(profiles, profile.id);
@@ -654,7 +1046,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const input = document.createElement('input');
       input.type = 'text';
       input.value = field.value || '';
-      input.style.cssText = 'padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 4px; width: 150px;';
+      input.style.cssText = 'padding: 4px 8px; border: 1px solid var(--border-strong); border-radius: 4px; width: 150px;';
       input.addEventListener('change', function () {
         window.updateFieldValue(profile.id, idx, input.value);
       });
@@ -702,7 +1094,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const fields = profile.fields || [];
     fields.forEach(function (field, idx) {
       const tr = document.createElement('tr');
-      tr.style.borderBottom = '1px solid #eee';
+      tr.style.borderBottom = '1px solid var(--border)';
 
       // Field Name
       const tdName = document.createElement('td');
@@ -774,7 +1166,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Return a preview sample for a detected field type using SFFormData.
   window.previewGeneratedValue = function (detectedType) {
     if (typeof SFFormData !== 'undefined' && SFFormData.generateCustomFieldValue) {
-      return SFFormData.generateCustomFieldValue(detectedType);
+      return SFFormData.generateCustomFieldValue(detectedType) || '(chosen by AI at fill time)';
     }
     return '';
   };
@@ -846,7 +1238,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     countryLabel.textContent = 'Country';
     countryLabel.style.display = 'block';
     const countrySelect = document.createElement('select');
-    countrySelect.style.cssText = 'width: 100%; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 8px; margin-bottom: 0;';
+    countrySelect.style.cssText = 'width: 100%; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 8px; margin-bottom: 0;';
 
     if (typeof SFAddress !== 'undefined') {
       const countries = SFAddress.listCountries();
@@ -938,7 +1330,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       Array.from(addrContainer.querySelectorAll('[data-field]')).forEach(input => {
         const fieldKey = input.getAttribute('data-field');
         const wrap = input.parentElement;
-        wrap.style.cssText = 'margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid #e2e8f0;';
+        wrap.style.cssText = 'margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border);';
 
         // Exclude checkbox
         const excludeWrap = document.createElement('div');
@@ -974,7 +1366,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         pinInput.type = 'text';
         pinInput.id = `pin-${fieldKey}`;
         pinInput.value = pins[fieldKey] || '';
-        pinInput.style.cssText = 'flex: 1; padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 13px; margin-bottom: 0;';
+        pinInput.style.cssText = 'flex: 1; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: 4px; font-size: 13px; margin-bottom: 0;';
         pinInput.addEventListener('change', async () => {
           const newPins = { ...pins, [fieldKey]: pinInput.value };
           profiles = SFFormData.profilePatch(profiles, id, { pins: newPins });
@@ -1056,7 +1448,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         var safeVal = (field.value || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;');
         actionHtml = '<input type="text" value="' + safeVal + '" ' +
           'onchange="window.updateFieldValue(\'' + fId + '\',\'' + fName + '\',this.value)" ' +
-          'style="padding:4px 8px;border:1px solid #cbd5e1;border-radius:4px;width:150px;" />';
+          'style="padding:4px 8px;border:1px solid var(--border-strong);border-radius:4px;width:150px;" />';
       } else if (field.mode === 'generated') {
         var dt = (field.detectedType || field.htmlName || '').replace(/'/g, "\\'");
         actionHtml = '<button onclick="window.previewGeneratedValue(\'' + dt + '\')">Preview</button>';
@@ -1064,7 +1456,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         actionHtml = '—';
       }
 
-      return '<tr style="border-bottom:1px solid #eee;">' +
+      return '<tr style="border-bottom:1px solid var(--border);">' +
         '<td style="padding:8px;">' + (field.htmlName || '') + '</td>' +
         '<td style="padding:8px;">' + (field.htmlType  || '') + '</td>' +
         '<td style="padding:8px;">' +
@@ -1093,7 +1485,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       metaHtml +
       '<h4 style="font-size:13px;font-weight:600;margin:0 0 8px;">Fields</h4>' +
       '<table id="formFieldsTable" style="width:100%;border-collapse:collapse;">' +
-        '<thead><tr style="border-bottom:1px solid #ccc;">' +
+        '<thead><tr style="border-bottom:1px solid var(--border);">' +
           '<th style="padding:8px;text-align:left;">Field Name</th>' +
           '<th style="padding:8px;text-align:left;">HTML Type</th>' +
           '<th style="padding:8px;text-align:left;">Mode</th>' +
@@ -1103,10 +1495,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       '</table>' +
       '<div style="margin-top:15px;">' +
         '<button onclick="window.deleteFormProfile()" ' +
-          'style="background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;padding:6px 12px;border-radius:6px;cursor:pointer;margin-right:8px;">' +
+          'style="background:var(--error-bg);color:var(--error-fg);border:1px solid var(--error-border);padding:6px 12px;border-radius:6px;cursor:pointer;margin-right:8px;">' +
           'Delete Profile</button>' +
         '<button onclick="window.saveFormProfile()" ' +
-          'style="background:#2563eb;color:white;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;">' +
+          'style="background:var(--primary);color:var(--on-primary);border:none;padding:6px 12px;border-radius:6px;cursor:pointer;">' +
           'Save</button>' +
       '</div>';
 

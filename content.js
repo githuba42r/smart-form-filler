@@ -7,9 +7,19 @@
 (() => {
   'use strict';
 
-  // Guard against double-injection (manifest + popup's on-demand injectContentScript).
-  if (window.__smartFormFillerLoaded) return;
+  // An extension reload/update orphans running copies of this script (chrome.runtime.id
+  // disappears); background.js then injects a fresh copy into open tabs.
+  // Check the runtime this copy started with — a later copy may share this window.
+  const ownRuntime = (typeof chrome !== 'undefined' && chrome.runtime) || null;
+  function extensionAlive() {
+    try { return !!(ownRuntime && ownRuntime.id); } catch (_) { return false; }
+  }
+
+  // Guard against double-injection (manifest + popup's on-demand injectContentScript),
+  // but take over from a copy whose extension context is gone.
+  if (window.__smartFormFillerLoaded && (!window.__sfIsAlive || window.__sfIsAlive())) return;
   window.__smartFormFillerLoaded = true;
+  window.__sfIsAlive = extensionAlive;
 
   // In-memory store for the current page's detected fields (live element references)
   let detectedFields = [];
@@ -56,10 +66,23 @@
       if (text) return text;
     }
 
-    // 5. Nearby previous sibling that looks like a label
+    // 5. A <label> in the control's own group whose `for` is broken or missing —
+    //    e.g. <label for="x--dob"> beside a date-picker input with id="db-input".
+    let group = el.parentElement;
+    for (let depth = 0; group && depth < 5 && group !== document.body; depth++, group = group.parentElement) {
+      if (group.querySelectorAll(FILLABLE_SELECTOR).length > 1) break; // reached a container of several fields
+      const label = Array.from(group.querySelectorAll('label')).find(l =>
+        !l.contains(el) && !(l.htmlFor && document.getElementById(l.htmlFor)) && l.textContent.trim());
+      if (label) return label.textContent.trim();
+    }
+
+    // 6. Nearby previous sibling that looks like a label
     let sibling = el.previousElementSibling;
     let attempts = 0;
     while (sibling && attempts < 4) {
+      // A label that precedes another control (or is bound to one) belongs to that control.
+      if (/^(input|select|textarea)$/i.test(sibling.tagName)) break;
+      if (sibling.tagName === 'LABEL' && sibling.htmlFor && sibling.htmlFor !== el.id) break;
       const txt = sibling.textContent.trim();
       if (txt.length > 2 && txt.length < 120 && !/^(input|select|button|textarea)$/i.test(sibling.tagName)) {
         // Heuristic: looks like a label if short and not another control
@@ -71,7 +94,7 @@
       attempts++;
     }
 
-    // 6. Placeholder or name/id cleaned up
+    // 7. Placeholder or name/id cleaned up
     if (el.placeholder && el.placeholder.trim().length > 2) {
       return el.placeholder.trim();
     }
@@ -88,6 +111,162 @@
   }
 
   /**
+   * Label of the group a control sits in (<fieldset> legend or role="group" label) —
+   * the only context split controls such as Day / Month / Year selects carry.
+   */
+  function getGroupLabel(el) {
+    const fieldset = el.closest && el.closest('fieldset');
+    const legend = fieldset && fieldset.querySelector('legend');
+    if (legend && legend.textContent.trim()) return legend.textContent.trim();
+    const group = el.closest && el.closest('[role="group"], [role="radiogroup"]');
+    if (group) {
+      const aria = group.getAttribute('aria-label');
+      if (aria && aria.trim()) return aria.trim();
+      const by = group.getAttribute('aria-labelledby');
+      const byEl = by && document.getElementById(by.split(' ')[0]);
+      if (byEl && byEl.textContent.trim()) return byEl.textContent.trim();
+    }
+    return '';
+  }
+
+  // Visible, selectable option texts of a <select> (placeholders like "Select…" dropped).
+  function selectOptionTexts(el) {
+    if (!el || el.tagName.toLowerCase() !== 'select') return [];
+    return Array.from(el.options)
+      .filter(o => !o.disabled && o.value !== '' && !/^(select|choose|please|--|none|—)\b/i.test(o.textContent.trim()))
+      .map(o => o.textContent.trim());
+  }
+
+  // Elements that carry a field's description / help text (not validation errors).
+  const HELP_SELECTOR = '.form-text, .help-block, .help-text, .hint, .description, .field-description, ' +
+    '[class*="__hint"], [class*="__help"], [class*="-help"], [class*="helper"], [class*="description"], small';
+
+  /**
+   * All descriptive text attached to a control: aria-describedby targets, its title, and
+   * help/hint/description elements in its own group (e.g. "…to confirm you are over 18"
+   * under a DOB picker). Passed to the AI so values honour the stated requirements.
+   */
+  function getHelpText(el) {
+    const parts = [];
+    const add = t => { t = (t || '').replace(/\s+/g, ' ').trim(); if (t && parts.indexOf(t) === -1) parts.push(t); };
+    ((el.getAttribute && el.getAttribute('aria-describedby')) || '').split(/\s+/).filter(Boolean)
+      .forEach(id => { const n = document.getElementById(id); if (n) add(n.textContent); });
+    if (el.title) add(el.title);
+    let group = el.parentElement;
+    for (let depth = 0; group && depth < 5 && group !== document.body; depth++, group = group.parentElement) {
+      if (group.querySelectorAll(FILLABLE_SELECTOR).length > 1) break;
+      group.querySelectorAll(HELP_SELECTOR).forEach(n => {
+        if (!n.contains(el) && !/error|invalid/i.test(n.className || '')) add(n.textContent);
+      });
+    }
+    return parts.join(' ').slice(0, 300);
+  }
+
+  /**
+   * Everything the page says about a control: label, name, placeholder, group context,
+   * options and constraints. Feeds both the heuristics and the AI value choice.
+   */
+  function describeControl(el) {
+    const d = {
+      name: el.name || el.id || '',
+      type: el.type || el.tagName.toLowerCase(),
+      label: getBestLabel(el),
+      ariaLabel: (el.getAttribute && el.getAttribute('aria-label')) || '',
+      placeholder: el.placeholder || '',
+      context: getGroupLabel(el)
+    };
+    const hint = getHelpText(el);
+    if (hint) d.hint = hint;
+    const options = selectOptionTexts(el);
+    if (options.length) d.options = options.slice(0, 40);
+    if (el.maxLength > 0) d.maxLength = el.maxLength;
+    ['min', 'max', 'pattern'].forEach(a => { const v = el.getAttribute && el.getAttribute(a); if (v) d[a] = v; });
+    if (el.required) d.required = true;
+    return d;
+  }
+
+  // Birth-date signals; run on spacedText() so "dob_day" / "birthMonth" match too.
+  const BIRTH_RE = /\bdob\b|\bbirth|\bbday\b|\bd\.o\.b\b/;
+  function spacedText(str) {
+    return String(str || '').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_\-\[\]]+/g, ' ').toLowerCase();
+  }
+  function isBirthField(field) {
+    return BIRTH_RE.test(spacedText(`${field.label} ${field.name} ${field.placeholder} ${field.context || ''}`));
+  }
+
+  /**
+   * Which part of a date a control holds: 'day' | 'month' | 'year' | 'full'.
+   * Selects are judged by their options; text inputs by their wording.
+   */
+  function datePartFor(el, field) {
+    const type = (el.type || '').toLowerCase();
+    if (type === 'date' || type === 'datetime-local' || type === 'month') return 'full';
+    if (el.tagName.toLowerCase() === 'select') {
+      const opts = selectOptionTexts(el);
+      const months = window.SFFormData.MONTH_NAMES.map(m => m.slice(0, 3).toLowerCase());
+      if (opts.some(t => months.indexOf(t.slice(0, 3).toLowerCase()) !== -1)) return 'month';
+      const nums = opts.map(t => parseInt(t, 10)).filter(n => !isNaN(n));
+      if (nums.length && nums.every(n => n >= 1000)) return 'year';
+      if (nums.length >= 28 && Math.max(...nums) <= 31) return 'day';
+      if (nums.length === 12 && Math.max(...nums) === 12) return 'month';
+    }
+    const text = spacedText(`${field.label} ${field.name} ${field.placeholder}`)
+      .replace(/date of birth|birth ?(day|date)/g, ' ');
+    const parts = [];
+    if (/\b(day|dd)\b/.test(text)) parts.push('day');
+    if (/\b(month|mm)\b/.test(text)) parts.push('month');
+    if (/\b(year|yyyy|yy)\b/.test(text)) parts.push('year');
+    return parts.length === 1 ? parts[0] : 'full';
+  }
+
+  /**
+   * Format token for a full-date text input, e.g. 'DD/MM/YYYY', from its placeholder,
+   * label or pattern; otherwise the profile country's convention.
+   */
+  function dateFormatFor(el, field, country) {
+    const type = (el.type || '').toLowerCase();
+    if (type === 'date') return 'YYYY-MM-DD';
+    if (type === 'datetime-local') return 'YYYY-MM-DDT09:00';
+    if (type === 'month') return 'YYYY-MM';
+    const hint = `${field.placeholder} ${field.label} ${el.getAttribute('data-format') || ''}`;
+    const m = /\b(d{1,2}|m{1,4}|y{2}(?:y{2})?)([\/\-. ])(d{1,2}|m{1,4})\2(y{2}(?:y{2})?|d{1,2})\b/i.exec(hint);
+    if (m) return m[0].toUpperCase();
+    return country === 'US' ? 'MM/DD/YYYY' : 'DD/MM/YYYY';
+  }
+
+  /**
+   * Render an ISO date for a specific control: the right part (day / month / year) and
+   * format, or for a <select> the value of the matching option. Non-ISO values pass through.
+   */
+  function adaptDateValue(el, field, value, country) {
+    const F = window.SFFormData;
+    const d = F.parseISODate(value);
+    if (!d) return value;
+    const part = datePartFor(el, field);
+    if (el.tagName.toLowerCase() === 'select') {
+      const num = part === 'day' ? d.day : part === 'month' ? d.month : d.year;
+      const name = part === 'month' ? F.MONTH_NAMES[d.month - 1].toLowerCase() : '';
+      const real = Array.from(el.options).filter(o => o.value !== '' && !o.disabled);
+      const hit = real.find(o => {
+        const t = o.textContent.trim().toLowerCase(), v = String(o.value).toLowerCase();
+        if (parseInt(v, 10) === num || parseInt(t, 10) === num) return true;
+        return !!name && (t === name || t === name.slice(0, 3) || v === name || v === name.slice(0, 3));
+      });
+      if (hit) return hit.value;
+      // Year list that doesn't reach the generated year: take the closest one.
+      const numeric = real.filter(o => !isNaN(parseInt(o.textContent, 10)));
+      if (!numeric.length) return value;
+      return numeric.reduce((best, o) =>
+        Math.abs(parseInt(o.textContent, 10) - num) < Math.abs(parseInt(best.textContent, 10) - num) ? o : best
+      ).value;
+    }
+    if (part === 'day') return F.formatDate(value, 'DD');
+    if (part === 'month') return F.formatDate(value, 'MM');
+    if (part === 'year') return F.formatDate(value, el.maxLength === 2 ? 'YY' : 'YYYY');
+    return F.formatDate(value, dateFormatFor(el, field, country));
+  }
+
+  /**
    * Classify a field into a semantic category for heuristic matching.
    */
   function getFieldCategory(field) {
@@ -98,7 +277,8 @@
     if (type === 'email' || /\bemail\b|\be-mail\b/.test(text)) return 'email';
     if (type === 'tel' || /\bphone\b|\bmobile\b|\btel\b|\bcontact.?number\b/.test(text)) return 'phone';
     if (/\bpassword\b|\bpwd\b|\bpass(word)?\b/.test(text)) return 'password';
-    if (type === 'date' || /\bdob\b|\bdate.?of.?birth\b|\bbirthday\b/.test(text)) return 'dob';
+    if (isBirthField(field)) return 'dob';
+    if (type === 'date') return 'date'; // a date, but not a birth date — don't fill it with a DOB
 
     if (/\bfirst.?name\b|\bgiven.?name\b|\bfname\b/.test(text)) return 'firstName';
     if (/\blast.?name\b|\bsurname\b|\blname\b|\bfamily.?name\b/.test(text)) return 'lastName';
@@ -152,11 +332,9 @@
       } else if (inputType === 'checkbox' || inputType === 'radio') {
         const shouldCheck = ['true', '1', 'yes', 'on', 'checked'].includes(String(value).toLowerCase());
         el.checked = shouldCheck;
-      } else if (inputType === 'date' || inputType === 'datetime-local' || inputType === 'month') {
-        // Assume value is already in correct format or try to normalize simple cases
-        el.value = value;
       } else {
-        el.value = value;
+        // Native setter, so React/Vue value-trackers register the change.
+        setInputValue(el, value);
       }
 
       // Critical: dispatch events so frameworks pick up the change
@@ -356,6 +534,7 @@
         name: el.name || el.id || '',
         type: el.type || el.tagName.toLowerCase(),
         placeholder: el.placeholder || '',
+        context: getGroupLabel(el),
         formIndex: 0,
         fieldIndex: idx
       });
@@ -597,6 +776,15 @@
    * re-asserted afterwards — replicating the form's manual address-entry path.
    */
   async function fillWithProfile(profileKey, opts = {}) {
+    setBusy(true);
+    try {
+      return await fillWithProfileNow(profileKey, opts);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function fillWithProfileNow(profileKey, opts = {}) {
     const F = window.SFFormData;
     const profile = await loadProfile(profileKey);
 
@@ -662,8 +850,9 @@
           // Don't overwrite a field the user/form already populated (idempotent re-passes).
           if (handled.has(el) && !isEmptyValue(el)) { continue; }
 
-          const value = values[category];
+          let value = values[category];
           if (value === null || value === undefined) continue;
+          if (category === 'dob') value = adaptDateValue(el, field, value, profile.country);
 
           const isAuto = isAutocompleteInput(el);
 
@@ -813,9 +1002,10 @@
         }
         if (fieldConfig.mode === 'pinned')    return fieldConfig.value;
         if (fieldConfig.mode === 'generated') {
-          return window.SFAIDetector
+          const generated = window.SFAIDetector
             ? await window.SFAIDetector.generateCustomFieldValue(field)
             : undefined;
+          return generated === '' ? undefined : generated;
         }
         return undefined; // empty | excluded | unknown mode → skip
       }
@@ -831,35 +1021,35 @@
       }
     }
 
-    // ── Custom / unknown field → AI generation ──────────────────────────────
+    // ── Custom / unknown field → AI picks a value from label, name, options… ─
+    // Checkboxes/radios are left alone: there is no meaningful "value" to invent.
+    const htmlType = (field.htmlType || field.type || '').toLowerCase();
+    if (htmlType === 'checkbox' || htmlType === 'radio') return undefined;
     if (window.SFAIDetector) {
-      return await window.SFAIDetector.generateCustomFieldValue(field);
+      const generated = await window.SFAIDetector.generateCustomFieldValue(field);
+      return generated === '' ? undefined : generated; // nothing appropriate → leave blank
     }
     return undefined;
   }
 
   /**
-   * Apply a { htmlName: value } map to DOM elements.
-   * Used by the AI-powered fill path; simpler than the multi-pass heuristic fill.
+   * Write resolved values to their controls. Used by the AI-powered fill path.
+   * Date types (dob / date) are rendered per control: part, format or matching option.
    *
-   * @param {object} valuesToFill
+   * @param {Array<{el, value, detectedType}>} entries
+   * @param {string} [country] Profile country (default date order for text inputs)
    * @returns {number} Number of fields successfully filled
    */
-  async function fillFormWithValues(valuesToFill) {
+  function fillFormWithValues(entries, country) {
     let filledCount = 0;
-    const keys = Object.keys(valuesToFill || {});
-    for (let i = 0; i < keys.length; i++) {
-      const htmlName = keys[i];
-      const value    = valuesToFill[htmlName];
-      if (value === undefined || value === null) continue;
-      let el = null;
-      try {
-        el = document.querySelector('[name="' + htmlName.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"]')
-          || document.getElementById(htmlName);
-      } catch (_) {}
-      if (!el) continue;
-      if (applyValueToElement(el, value)) filledCount++;
-    }
+    entries.forEach(function (entry) {
+      const el = entry.el;
+      if (!el || !el.isConnected || entry.value === undefined || entry.value === null) return;
+      const isDate = entry.detectedType === 'dob' || entry.detectedType === 'date';
+      const iso = isDate ? window.SFFormData.toISODate(entry.value) : null;
+      const finalValue = iso ? adaptDateValue(el, describeControl(el), iso, country) : entry.value;
+      if (applyValueToElement(el, finalValue)) filledCount++;
+    });
     return filledCount;
   }
 
@@ -872,21 +1062,20 @@
     const allControls = Array.from(document.querySelectorAll(
       'input:not([type="hidden"]):not([type="submit"]):not([type="button"])' +
       ':not([type="reset"]):not([type="image"]), select, textarea'
-    )).filter(function (el) { return !!(el.name || el.id); });
+    ));
 
     if (!allControls.length) {
       return { success: false, message: 'No fillable fields detected on page.' };
     }
 
-    const fieldsForAI = allControls.map(function (el) {
-      return {
-        name:        el.name || el.id || '',
-        type:        el.type || el.tagName.toLowerCase(),
-        label:       getBestLabel(el),
-        ariaLabel:   (el.getAttribute && el.getAttribute('aria-label')) || '',
-        placeholder: el.placeholder || ''
-      };
+    // Controls without name/id get a positional name so the LLM can still refer to them.
+    const fieldsForAI = allControls.map(function (el, i) {
+      const d = describeControl(el);
+      if (!d.name) d.name = 'field_' + i;
+      return d;
     });
+    const indexByName = {};
+    fieldsForAI.forEach(function (d, i) { if (!(d.name in indexByName)) indexByName[d.name] = i; });
 
     // AI classification (may return a cached result)
     const aiResult = await window.SFAIDetector.detectFormFields({
@@ -904,16 +1093,48 @@
     // Pre-resolve standard values (policy + transient only-filter already applied)
     const standardValues = F.resolveValues(activeProfile, (opts && opts.only) || null);
 
-    // Resolve value for each AI-detected field
-    const valuesToFill = {};
+    // Resolve value for each AI-detected field. The page's own description (options,
+    // constraints, group context) is merged in so value generation can use it.
+    const entries = [];
+    const seen    = new Set();
     for (let i = 0; i < aiResult.fields.length; i++) {
-      const aiField = aiResult.fields[i];
-      const value   = await resolveFieldValue(aiField, activeProfile, opts, standardValues);
-      const key     = aiField.htmlName || aiField.name || '';
-      if (key && value !== undefined) valuesToFill[key] = value;
+      const detected = aiResult.fields[i];
+      const key      = detected.htmlName || detected.name || '';
+      // Match by name; if the LLM mangled it, fall back to position (the prompt asks for same order).
+      const idx = (key in indexByName) ? indexByName[key] : (i < allControls.length ? i : -1);
+      if (idx === -1 || seen.has(idx)) continue;
+      seen.add(idx);
+      const dom      = fieldsForAI[idx];
+      const aiField  = Object.assign({}, dom, detected, {
+        htmlType: detected.htmlType || dom.type,
+        label:    detected.label || dom.label,
+        llmUnavailable: !!aiResult.error
+      });
+      // The LLM sometimes misses split DOB parts (Day / Month / Year); the page's wording wins.
+      if (aiField.detectedType !== 'dob' && isBirthField(dom)) aiField.detectedType = 'dob';
+      aiField.htmlName = dom.name;
+      // Checkboxes/radios follow the same rule as the heuristic path: tick consent boxes,
+      // leave everything else (contact-preference toggles, "same as billing") untouched.
+      const ctlType = (allControls[idx].type || '').toLowerCase();
+      if (ctlType === 'checkbox' || ctlType === 'radio') {
+        if (ctlType === 'checkbox' && !allControls[idx].checked && checkboxPolicy(dom) === 'check') {
+          entries.push({ el: allControls[idx], value: 'true', detectedType: 'consent' });
+        }
+        continue;
+      }
+      const aiChooses = !(F.CANONICAL_TO_ENGINE && F.CANONICAL_TO_ENGINE[aiField.detectedType]);
+      const stopThrobber = aiChooses ? showFieldThrobber(allControls[idx]) : null;
+      let value;
+      try {
+        value = await resolveFieldValue(aiField, activeProfile, opts, standardValues);
+      } finally {
+        if (stopThrobber) stopThrobber();
+      }
+      dbg('ai field', dom.name, JSON.stringify(dom.label), '→', aiField.detectedType, '=', JSON.stringify(value));
+      if (value !== undefined) entries.push({ el: allControls[idx], value: value, detectedType: aiField.detectedType });
     }
 
-    const filledCount = await fillFormWithValues(valuesToFill);
+    const filledCount = fillFormWithValues(entries, activeProfile.country);
     return {
       success:     true,
       filledCount,
@@ -922,6 +1143,153 @@
     };
   }
 
+
+  // ============================================================
+  // Busy indicators while the AI considers field values: spinning ring on the
+  // ✨ form icons, a badge spinner on the toolbar icon (background.js) and a
+  // small throbber beside each field being populated.
+  // ============================================================
+  const BUSY_ATTR = 'data-sf-busy';
+  let busyCount = 0;
+
+  function ensureBusyStyles() {
+    if (document.getElementById('sf-busy-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'sf-busy-styles';
+    style.setAttribute(SF_UI_ATTR, '');
+    style.textContent = `
+      @keyframes sf-spin { to { transform: rotate(360deg); } }
+      button[${SF_UI_ATTR}][${BUSY_ATTR}] { cursor: progress !important; }
+      button[${SF_UI_ATTR}][${BUSY_ATTR}]::after {
+        content: ""; position: absolute; inset: -4px; border-radius: 50%; pointer-events: none;
+        border: 3px solid rgba(37, 99, 235, 0.25); border-top-color: #2563eb; border-right-color: #60a5fa;
+        animation: sf-spin 0.8s linear infinite; box-sizing: border-box;
+      }
+      .sf-throbber {
+        position: fixed; z-index: 2147483646; width: 16px; height: 16px; margin: 0; padding: 0;
+        border-radius: 50%; border: 2px solid rgba(37, 99, 235, 0.25); border-top-color: #2563eb;
+        box-sizing: border-box; pointer-events: none; animation: sf-spin 0.7s linear infinite;
+      }
+      .sf-mini-spin {
+        display: inline-block; width: 12px; height: 12px; margin-right: 8px; vertical-align: -2px;
+        border-radius: 50%; border: 2px solid rgba(37, 99, 235, 0.25); border-top-color: #2563eb;
+        box-sizing: border-box; animation: sf-spin 0.7s linear infinite;
+      }
+      @keyframes sf-chord-pulse { 50% { box-shadow: 0 0 0 6px rgba(245, 158, 11, 0.25); } }
+      button[${SF_UI_ATTR}][${CHORD_ATTR}] {
+        background: #f59e0b !important; color: #111827 !important;
+        animation: sf-chord-pulse 1s ease-in-out infinite;
+      }
+      .sf-chord-hint {
+        position: fixed; z-index: 2147483647; background: #0f172a; color: #f1f5f9;
+        border: 1px solid #f59e0b; border-radius: 10px; padding: 8px 12px;
+        font: 13px/1.7 system-ui, -apple-system, sans-serif; box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3);
+      }
+      .sf-chord-hint .sf-chord-title { font-size: 11px; font-weight: 700; color: #fcd34d; letter-spacing: 0.3px; }
+      .sf-chord-hint kbd {
+        display: inline-block; min-width: 18px; text-align: center; margin-right: 6px;
+        font: 600 11px ui-monospace, monospace; color: #0f172a; background: #f1f5f9;
+        border-radius: 4px; padding: 0 5px; border-bottom: 2px solid #94a3b8;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        button[${SF_UI_ATTR}][${CHORD_ATTR}] { animation: none; }
+        button[${SF_UI_ATTR}][${BUSY_ATTR}]::after, .sf-throbber, .sf-mini-spin { animation-duration: 2.4s; }
+      }`;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  // Reference-counted: nested fills (e.g. right-click during fill-all) stay busy until all finish.
+  function setBusy(on) {
+    busyCount = Math.max(0, busyCount + (on ? 1 : -1));
+    const busy = busyCount > 0;
+    if (busy) ensureBusyStyles();
+    formButtons.forEach(({ btn }) => {
+      if (busy) {
+        btn.setAttribute(BUSY_ATTR, '');
+        btn.title = 'SmartForm is asking the AI for field values…';
+      } else {
+        btn.removeAttribute(BUSY_ATTR);
+        btn.title = 'Scan this form with SmartForm Filler';
+      }
+    });
+    try {
+      if (chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({ action: 'aiBusy', busy }, () => { void chrome.runtime.lastError; });
+      }
+    } catch (_) { /* extension context gone (reloaded) — on-page indicators still work */ }
+  }
+
+  // Small spinner just inside the right edge of a field. Returns a stop() function.
+  function showFieldThrobber(el) {
+    if (!el || !el.getBoundingClientRect) return function () {};
+    ensureBusyStyles();
+    const t = document.createElement('div');
+    t.className = 'sf-throbber';
+    t.setAttribute(SF_UI_ATTR, '');
+    t.setAttribute('role', 'status');
+    t.setAttribute('aria-label', 'SmartForm is choosing a value');
+    const place = () => {
+      const r = el.getBoundingClientRect();
+      t.style.left = Math.max(0, r.right - 24) + 'px';
+      t.style.top = (r.top + Math.max(0, (r.height - 16) / 2)) + 'px';
+    };
+    place();
+    document.body.appendChild(t);
+    window.addEventListener('scroll', place, true);
+    window.addEventListener('resize', place);
+    return function stop() {
+      window.removeEventListener('scroll', place, true);
+      window.removeEventListener('resize', place);
+      t.remove();
+    };
+  }
+
+  // ============================================================
+  // Right-click → "Fill this field with AI suggestion"
+  // ============================================================
+  let lastContextTarget = null;
+  document.addEventListener('contextmenu', function (e) {
+    const t = e.target;
+    lastContextTarget = (t && t.matches && t.matches(FILLABLE_SELECTOR)) ? t
+      : (t && t.closest ? t.closest(FILLABLE_SELECTOR) : null);
+  }, true);
+
+  /**
+   * Ask the AI for a value for one control, chosen from its label, name, placeholder,
+   * group context and options, and write it. Profile data is not used.
+   */
+  async function aiSuggestField(el) {
+    el = el || lastContextTarget || (document.activeElement && document.activeElement.matches &&
+      document.activeElement.matches(FILLABLE_SELECTOR) ? document.activeElement : null);
+    if (!el || !el.isConnected) return { success: false, message: 'No form field selected.' };
+    if (!window.SFAIDetector || !window.SFAIDetector.suggestFieldValue) {
+      return { success: false, message: 'AI detector not loaded.' };
+    }
+    const d = describeControl(el);
+    showToast('Asking AI for “' + d.label + '”…');
+    const stopThrobber = showFieldThrobber(el);
+    setBusy(true);
+    let res;
+    try {
+      res = await window.SFAIDetector.suggestFieldValue(Object.assign({}, d, {
+        htmlName: d.name, htmlType: d.type, currentValue: el.value || ''
+      }));
+    } finally {
+      stopThrobber();
+      setBusy(false);
+    }
+    if (res.error) {
+      showToast('AI suggestion failed: ' + res.error);
+      return { success: false, message: res.error };
+    }
+    const isDate = isBirthField(d) || /^(date|datetime-local|month)$/.test((el.type || '').toLowerCase());
+    const iso = isDate ? window.SFFormData.toISODate(res.value) : null;
+    const value = iso ? adaptDateValue(el, d, iso, (await loadProfile(null)).country) : res.value;
+    const ok = applyValueToElement(el, value);
+    showToast(ok ? 'AI filled “' + d.label + '”' : 'Could not fill “' + d.label + '”');
+    return { success: ok, value: value };
+  }
+  window.__sfAISuggestField = aiSuggestField;
 
   // ============================================================
   // Per-form scan icons — let the user target a specific form/modal
@@ -1069,9 +1437,33 @@
     });
 
     const header = document.createElement('div');
+    header.setAttribute('data-role', 'header');
     header.textContent = `${scanResult.fieldCount} field${scanResult.fieldCount === 1 ? '' : 's'} • ${scanResult.scopeName}`;
-    Object.assign(header.style, { fontSize: '11px', color: '#64748b', padding: '4px 8px 6px', fontWeight: '600' });
-    fillMenu.appendChild(header);
+    Object.assign(header.style, { fontSize: '11px', color: '#64748b', padding: '4px 8px 6px', fontWeight: '600', flex: '1' });
+    const cog = document.createElement('button');
+    cog.type = 'button';
+    cog.setAttribute(SF_UI_ATTR, '');
+    cog.setAttribute('data-role', 'settings');
+    cog.title = 'SmartForm settings';
+    cog.setAttribute('aria-label', 'Open SmartForm settings');
+    cog.textContent = '⚙';
+    Object.assign(cog.style, {
+      border: 'none', background: 'transparent', cursor: 'pointer', fontSize: '15px', lineHeight: '1',
+      color: '#64748b', padding: '4px 6px', borderRadius: '6px'
+    });
+    cog.addEventListener('mouseenter', () => { cog.style.background = '#f1f5f9'; cog.style.color = '#0f172a'; });
+    cog.addEventListener('mouseleave', () => { cog.style.background = 'transparent'; cog.style.color = '#64748b'; });
+    cog.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeFillMenu();
+      try { chrome.runtime.sendMessage({ action: 'openOptions' }, () => { void chrome.runtime.lastError; }); }
+      catch (_) { showToast('Reload the page to use SmartForm settings'); }
+    });
+    const headerRow = document.createElement('div');
+    Object.assign(headerRow.style, { display: 'flex', alignItems: 'center', gap: '4px' });
+    headerRow.appendChild(header);
+    headerRow.appendChild(cog);
+    fillMenu.appendChild(headerRow);
 
     // Style and wire menu elements from SFProfileUI.buildMenu
     Array.from(menu.children).forEach(el => {
@@ -1085,7 +1477,7 @@
         el.addEventListener('mouseleave', () => { el.style.background = 'transparent'; });
 
         if (el.hasAttribute('data-only')) {
-          el.addEventListener('click', (e) => { e.stopPropagation(); runMenuAction(__sfMenuOnlyFor(el.getAttribute('data-only')), profileSel.value); });
+          el.addEventListener('click', (e) => { e.stopPropagation(); runMenuAction(__sfMenuOnlyFor(el.getAttribute('data-only')), profileSel.value, el); });
         } else if (el.hasAttribute('data-action') && el.getAttribute('data-action') === 'clear') {
           el.addEventListener('click', (e) => { e.stopPropagation(); clearDetected(); closeFillMenu(); showToast('Cleared detected fields'); });
         }
@@ -1114,7 +1506,27 @@
     setTimeout(() => document.addEventListener('click', onDocClickForMenu, true), 0);
   }
 
-  function runMenuAction(only, profileId) {
+  // Lock the menu while the AI works: spinner on the chosen action, everything else disabled.
+  function setMenuBusy(actionBtn) {
+    if (!fillMenu) return;
+    ensureBusyStyles();
+    fillMenu.style.cursor = 'progress';
+    fillMenu.querySelectorAll('button, select').forEach(c => { c.disabled = true; c.style.opacity = c === actionBtn ? '1' : '0.45'; });
+    const header = fillMenu.querySelector('[data-role="header"]');
+    if (header) header.textContent = 'AI is considering field values…';
+    if (actionBtn) {
+      const label = actionBtn.textContent;
+      actionBtn.textContent = '';
+      const spin = document.createElement('span');
+      spin.className = 'sf-mini-spin';
+      actionBtn.appendChild(spin);
+      actionBtn.appendChild(document.createTextNode(label + ' — asking AI…'));
+      actionBtn.style.background = '#eff6ff';
+    }
+  }
+
+  function runMenuAction(only, profileId, actionBtn) {
+    setMenuBusy(actionBtn);
     const res = fillWithProfile(profileId, { only, unique: true });
     if (res && res.then) {
       // fillWithProfile is async
@@ -1191,6 +1603,21 @@
       formButtons.push({ btn, target });
     });
     repositionButtons();
+    reportFormStatus();
+  }
+
+  // Tell the background how many fillable fields this page has, so the toolbar icon
+  // can switch between its grey (nothing to fill) and full-colour (fields found) versions.
+  let lastReportedCount = -1;
+  function reportFormStatus() {
+    const count = liveControls().length;
+    if (count === lastReportedCount) return;
+    lastReportedCount = count;
+    try {
+      if (chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({ action: 'formStatus', count }, () => { void chrome.runtime.lastError; });
+      }
+    } catch (_) { /* extension reloaded — page keeps working */ }
   }
 
   function scheduleBuild() {
@@ -1199,10 +1626,13 @@
     setTimeout(() => { buildScheduled = false; ensureScanButtons(); }, 300);
   }
 
+  let formObserver = null;
   function initFormIcons() {
     try {
-      const mo = new MutationObserver(scheduleBuild);
-      mo.observe(document.documentElement, { childList: true, subtree: true });
+      // Icons left behind by an orphaned copy of this script (pre-update) belong to nobody now.
+      document.querySelectorAll('button[' + SF_UI_ATTR + ']').forEach(b => b.remove());
+      formObserver = new MutationObserver(() => { if (!teardownIfOrphaned()) scheduleBuild(); });
+      formObserver.observe(document.documentElement, { childList: true, subtree: true });
       window.addEventListener('scroll', scheduleReposition, true); // capture = catch inner scroll
       window.addEventListener('resize', scheduleReposition);
       scheduleBuild();
@@ -1221,6 +1651,11 @@
 
     if (msg.action === 'fillProfile') {
       fillWithProfile(msg.profileKey || 'au-personal', msg.opts || {}).then(sendResponse);
+      return true; // async response
+    }
+
+    if (msg.action === 'aiSuggestField') {
+      aiSuggestField().then(sendResponse);
       return true; // async response
     }
 
@@ -1250,6 +1685,174 @@
   });
 
   // Add the per-form scan icons once the DOM is ready.
+  // ============================================================
+  // Keyboard shortcuts (configured in settings; see hotkeys.js)
+  // ============================================================
+  let hotkeys = window.SFHotkeys ? window.SFHotkeys.resolve(null) : {};
+
+  function loadHotkeys() {
+    if (!window.SFHotkeys) return;
+    const key = window.SFHotkeys.STORAGE_KEY;
+    try {
+      chrome.storage.local.get([key]).then(s => { hotkeys = window.SFHotkeys.resolve(s && s[key]); }).catch(() => {});
+      if (chrome.storage.onChanged) {
+        chrome.storage.onChanged.addListener((changes, area) => {
+          if (area === 'local' && changes[key]) hotkeys = window.SFHotkeys.resolve(changes[key].newValue);
+        });
+      }
+    } catch (_) { /* extension context invalidated — keep defaults */ }
+  }
+
+  // A focused control the AI can fill on its own (not buttons, checkboxes or radios).
+  function focusedFillable() {
+    const el = document.activeElement;
+    if (!el || !el.matches || !el.matches(FILLABLE_SELECTOR)) return null;
+    const t = (el.type || '').toLowerCase();
+    if (t === 'checkbox' || t === 'radio' || el.disabled || el.readOnly) return null;
+    return el;
+  }
+
+  async function runFillFormHotkey() {
+    const { defaultProfile = null } = await chrome.storage.local.get(['defaultProfile']);
+    showToast('SmartForm: AI is filling the form…');
+    const res = await fillWithProfile(defaultProfile, { only: null, unique: true });
+    showToast(res && res.filledCount
+      ? `Filled ${res.filledCount} field${res.filledCount === 1 ? '' : 's'}`
+      : (res && res.message) || 'No matching fields on this page');
+  }
+
+  function runHotkeyAction(action) {
+    if (action === 'fillField') {
+      const el = focusedFillable();
+      if (!el) { showToast('SmartForm: focus an input field first'); return; }
+      aiSuggestField(el);
+    } else if (action === 'fillForm') {
+      runFillFormHotkey().catch(err => showToast('Error filling fields: ' + (err && err.message || 'Unknown')));
+    }
+  }
+
+  // ── Chord: leader pressed → icons switch to "waiting for key" until the next key ──
+  const CHORD_ATTR = 'data-sf-chord';
+  let chordTimer = null;
+  let chordHint = null;
+
+  function chordActive() { return chordTimer !== null; }
+
+  // The ✨ icon nearest the focused field (or the first visible one) anchors the key hint.
+  function chordAnchorButton() {
+    const visible = formButtons.filter(({ btn }) => btn.style.display !== 'none');
+    if (!visible.length) return null;
+    const focus = document.activeElement;
+    const owner = focus && visible.find(({ target }) => target.contains && target.contains(focus));
+    return (owner || visible[0]).btn;
+  }
+
+  function startChord() {
+    const H = window.SFHotkeys;
+    cancelChord();
+    ensureBusyStyles();
+    formButtons.forEach(({ btn }) => {
+      btn.setAttribute(CHORD_ATTR, '');
+      btn.textContent = '⌨';
+      btn.title = 'SmartForm: waiting for the next key…';
+    });
+    chordHint = document.createElement('div');
+    chordHint.className = 'sf-chord-hint';
+    chordHint.setAttribute(SF_UI_ATTR, '');
+    chordHint.setAttribute('role', 'status');
+    const title = document.createElement('div');
+    title.className = 'sf-chord-title';
+    title.textContent = 'SmartForm — press a key';
+    chordHint.appendChild(title);
+    Object.keys(H.ACTIONS).forEach(action => {
+      const code = hotkeys.chord.keys[action];
+      if (!code) return;
+      const row = document.createElement('div');
+      const k = document.createElement('kbd'); k.textContent = H.chordKeyLabel(code);
+      row.appendChild(k); row.appendChild(document.createTextNode(' ' + H.ACTIONS[action].label));
+      chordHint.appendChild(row);
+    });
+    const esc = document.createElement('div');
+    const k = document.createElement('kbd'); k.textContent = 'Esc';
+    esc.appendChild(k); esc.appendChild(document.createTextNode(' Cancel'));
+    chordHint.appendChild(esc);
+    document.body.appendChild(chordHint);
+    const anchor = chordAnchorButton();
+    if (anchor) {
+      const r = anchor.getBoundingClientRect(), m = chordHint.getBoundingClientRect();
+      chordHint.style.top = Math.min(window.innerHeight - m.height - 8, r.bottom + 8) + 'px';
+      chordHint.style.left = Math.max(8, r.right - m.width) + 'px';
+    } else {
+      chordHint.style.bottom = '20px';
+      chordHint.style.right = '20px';
+    }
+    chordTimer = setTimeout(cancelChord, H.CHORD_TIMEOUT_MS);
+  }
+
+  function cancelChord() {
+    clearTimeout(chordTimer);
+    chordTimer = null;
+    if (chordHint) { chordHint.remove(); chordHint = null; }
+    formButtons.forEach(({ btn }) => {
+      if (!btn.hasAttribute(CHORD_ATTR)) return;
+      btn.removeAttribute(CHORD_ATTR);
+      btn.textContent = '✨';
+      btn.title = 'Scan this form with SmartForm Filler';
+    });
+  }
+
+  function onHotkey(e) {
+    if (!window.SFHotkeys) return;
+    const H = window.SFHotkeys;
+    const chord = hotkeys.chord || {};
+
+    if (chordActive()) {
+      if (/^(Control|Alt|Shift|Meta|OS)/.test(e.code)) return; // still releasing the leader
+      e.preventDefault(); e.stopPropagation();
+      if (e.repeat) return;
+      const action = Object.keys(H.ACTIONS).find(a => H.matchesChordKey(e, chord.keys[a], chord.leader));
+      cancelChord();
+      if (action) runHotkeyAction(action);
+      else if (e.key !== 'Escape') showToast('SmartForm: no action on ' + (e.key || e.code));
+      return;
+    }
+    if (e.repeat) return;
+
+    if (chord.enabled && H.matches(e, chord.leader)) {
+      e.preventDefault(); e.stopPropagation();
+      startChord();
+    } else if (H.matches(e, hotkeys.fillField)) {
+      e.preventDefault(); e.stopPropagation();
+      runHotkeyAction('fillField');
+    } else if (H.matches(e, hotkeys.fillForm)) {
+      e.preventDefault(); e.stopPropagation();
+      runHotkeyAction('fillForm');
+    }
+  }
+
+  // Orphaned copy: stop reacting and remove our on-page UI so the fresh copy owns the page.
+  let tornDown = false;
+  function teardownIfOrphaned() {
+    if (tornDown || extensionAlive()) return false;
+    tornDown = true;
+    if (window.__sfIsAlive === extensionAlive) window.__smartFormFillerLoaded = false; // let a fresh copy in
+    window.removeEventListener('keydown', onHotkeyGuarded, true);
+    if (formObserver) formObserver.disconnect();
+    cancelChord();
+    formButtons.forEach(({ btn }) => btn.remove());
+    formButtons = [];
+    closeFillMenu();
+    return true;
+  }
+
+  function onHotkeyGuarded(e) {
+    if (teardownIfOrphaned()) return;
+    onHotkey(e);
+  }
+
+  loadHotkeys();
+  window.addEventListener('keydown', onHotkeyGuarded, true);
+
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initFormIcons, { once: true });
   } else {

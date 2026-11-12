@@ -178,8 +178,89 @@ const LLM_DETECTED_FIELDS = [
     const value = await win.SFAIDetector.generateCustomFieldValue(field);
 
     ok(typeof value === 'string', 'customVal fallback: returns a string');
-    ok(value.length > 0, 'customVal fallback: value is non-empty');
-    ok(value.indexOf('widget_code') !== -1, 'customVal fallback: fallback string includes the type name');
+    eq(value, '', 'customVal fallback: no appropriate value → empty (never text_<type>)');
+  }
+
+  // -------------------------------------------------------------------------
+  // Test 5b: local fallback picks a value from the field's type and wording
+  // -------------------------------------------------------------------------
+  {
+    const win = bootstrap({ sendMessageError: 'LLM unavailable' });
+    const G = win.SFAIDetector.generateCustomFieldValue;
+    eq(await G({ htmlName: 'website', htmlType: 'url', detectedType: 'website' }), 'https://www.example.com', 'local: url field');
+    eq(await G({ htmlName: 'qty', htmlType: 'number', min: '1', max: '5', detectedType: 'quantity' }), '3', 'local: number respects min/max');
+    eq(await G({ htmlName: 'plan', htmlType: 'select-one', options: ['Basic', 'Pro'], detectedType: 'plan' }), 'Basic', 'local: select picks a real option');
+    ok(/^\d{4}-\d{2}-\d{2}$/.test(await G({ htmlName: 'start', htmlType: 'date', detectedType: 'date' })), 'local: date input → ISO date');
+    const before = win.__sendMessageCallCount();
+    eq(await G({ htmlName: 'abn', label: 'ABN', htmlType: 'text', detectedType: 'abn', llmUnavailable: true }), '51 824 753 556', 'local: ABN by label');
+    eq(win.__sendMessageCallCount(), before, 'local: llmUnavailable skips the LLM call');
+  }
+
+  // -------------------------------------------------------------------------
+  // Test 5c: suggestedValue from detection is used without another LLM call;
+  //          junk / off-list LLM answers are rejected
+  // -------------------------------------------------------------------------
+  {
+    const win = bootstrap({ sendMessageResponse: { result: 'text_custom' } });
+    const G = win.SFAIDetector.generateCustomFieldValue;
+    eq(await G({ htmlName: 'job', label: 'Job title', detectedType: 'job_title', suggestedValue: 'Accountant' }), 'Accountant', 'suggested: used as-is');
+    eq(win.__sendMessageCallCount(), 0, 'suggested: no LLM call');
+    eq(await G({ htmlName: 'nickname', label: 'Nickname', htmlType: 'text', detectedType: 'nickname' }), '', 'junk: "text_custom" from LLM rejected');
+
+    const win2 = bootstrap({ sendMessageResponse: { result: '"premium"\n' } });
+    eq(await win2.SFAIDetector.generateCustomFieldValue({ htmlName: 'tier', options: ['Basic', 'Premium'], detectedType: 'tier' }),
+      'Premium', 'options: LLM answer matched to option text, quotes stripped');
+  }
+
+  // -------------------------------------------------------------------------
+  // Test 5d: prompt carries label/name/options; LLM types are normalised
+  // -------------------------------------------------------------------------
+  {
+    let prompt = '';
+    const win = bootstrap({ sendMessageResponse: { result: JSON.stringify([
+      { htmlName: 'birth', detectedType: 'Date of Birth' },
+      { htmlName: 'sname', detectedType: 'surname' },
+      { htmlName: 'pc', detectedType: 'postcode' }
+    ]) } });
+    const send = win.chrome.runtime.sendMessage;
+    win.chrome.runtime.sendMessage = function (msg, cb) { prompt = msg.prompt; return send(msg, cb); };
+    const res = await win.SFAIDetector.detectFormFields({ url: 'https://example.com/norm', fields: [
+      { name: 'birth', type: 'text', label: 'Birthday' },
+      { name: 'sname', type: 'text', label: 'Surname' },
+      { name: 'pc', type: 'select-one', label: 'Postcode', options: ['4000', '4101'] }
+    ] });
+    eq(res.fields.map(f => f.detectedType), ['dob', 'lastname', 'zip'], 'normalise: aliases → canonical types');
+    ok(prompt.indexOf('"options"') !== -1 && prompt.indexOf('4101') !== -1, 'prompt: includes select options');
+    ok(prompt.indexOf('suggestedValue') !== -1, 'prompt: asks for suggestedValue');
+  }
+
+  // -------------------------------------------------------------------------
+  // Test 5f: fields the LLM omits fall back to heuristics
+  // -------------------------------------------------------------------------
+  {
+    const win = bootstrap({ sendMessageResponse: { result: JSON.stringify([{ htmlName: 'fav', detectedType: 'wine_varietal' }]) } });
+    const res = await win.SFAIDetector.detectFormFields({ url: 'https://example.com/gaps', fields: [
+      { name: 'fav', type: 'text', label: 'Favourite wine' },
+      { name: 'email', type: 'email', label: 'Email' }
+    ] });
+    eq(res.fields.map(f => f.htmlName + ':' + f.detectedType), ['fav:wine_varietal', 'email:email'], 'omitted field classified by heuristics');
+    const empty = bootstrap({ sendMessageResponse: { result: '[]' } });
+    const r2 = await empty.SFAIDetector.detectFormFields({ url: 'https://example.com/empty', fields: [{ name: 'email', type: 'email' }] });
+    eq(r2.fields.map(f => f.detectedType), ['email'], 'empty LLM answer → heuristics for every field');
+  }
+
+  // -------------------------------------------------------------------------
+  // Test 5e: heuristics — split DOB parts are dob, other dates are not
+  // -------------------------------------------------------------------------
+  {
+    const win = bootstrap({ sendMessageError: 'down' });
+    const res = await win.SFAIDetector.detectFormFields({ url: 'https://example.com/dob', fields: [
+      { name: 'dob_day', type: 'select-one', label: 'Day' },
+      { name: 'birthMonth', type: 'select-one', label: 'Month' },
+      { name: 'year', type: 'select-one', label: 'Year', context: 'Date of birth' },
+      { name: 'start_date', type: 'date', label: 'Start date' }
+    ] });
+    eq(res.fields.map(f => f.detectedType), ['dob', 'dob', 'dob', 'date'], 'heuristic: DOB parts vs generic date');
   }
 
   // -------------------------------------------------------------------------

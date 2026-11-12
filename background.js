@@ -6,6 +6,7 @@
  */
 
 const DEFAULT_OLLAMA_URL = 'http://localhost:11434';
+const DEFAULT_OPENROUTER_MODEL = 'qwen/qwen3-coder'; // mirrors recommendations.js
 const DEFAULT_OLLAMA_MODEL = 'llama3.1:latest'; // Good balance; qwen2.5-coder, gemma2, phi4 also excellent for JSON
 
 // In-memory cache of last AI suggestion (optional)
@@ -201,17 +202,26 @@ Return the JSON now:`;
 
 /**
  * Dispatch a plain-text prompt to the configured LLM provider.
- * Reads provider settings from chrome.storage.sync.
+ * Reads provider settings from chrome.storage.local.
  * @returns {Promise<string>} The model's text response.
  */
 async function callLLM(prompt, timeoutMs = 10000) {
-  const settings = await chrome.storage.local.get(['provider', 'ollamaUrl', 'openrouterApiKey']);
+  const settings = await chrome.storage.local.get([
+    'provider', 'ollamaUrl', 'ollamaModel', 'openrouterApiKey', 'openrouterModel',
+    'anthropicApiKey', 'anthropicModel', 'openaiApiKey', 'openaiModel'
+  ]);
   const provider = settings.provider || 'ollama';
 
   if (provider === 'ollama') {
-    return await callOllama(prompt, settings.ollamaUrl || DEFAULT_OLLAMA_URL, timeoutMs);
+    return await callOllama(prompt, settings.ollamaUrl || DEFAULT_OLLAMA_URL, timeoutMs,
+      settings.ollamaModel || DEFAULT_OLLAMA_MODEL);
   } else if (provider === 'openrouter') {
-    return await callOpenRouter(prompt, settings.openrouterApiKey, timeoutMs);
+    return await callOpenRouter(prompt, settings.openrouterApiKey, timeoutMs,
+      settings.openrouterModel || DEFAULT_OPENROUTER_MODEL);
+  } else if (provider === 'anthropic') {
+    return await callAnthropic(prompt, settings.anthropicApiKey, settings.anthropicModel, timeoutMs);
+  } else if (provider === 'openai') {
+    return await callOpenAI(prompt, settings.openaiApiKey, settings.openaiModel, timeoutMs);
   } else {
     throw new Error(`Unknown LLM provider: ${provider}`);
   }
@@ -221,7 +231,7 @@ async function callLLM(prompt, timeoutMs = 10000) {
  * Call Ollama /api/generate with a plain-text prompt.
  * @returns {Promise<string>}
  */
-async function callOllama(prompt, url, timeoutMs) {
+async function callOllama(prompt, url, timeoutMs, model) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -230,7 +240,7 @@ async function callOllama(prompt, url, timeoutMs) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'mistral:latest',
+        model,
         prompt,
         stream: false,
         temperature: 0.3
@@ -253,7 +263,7 @@ async function callOllama(prompt, url, timeoutMs) {
  * Call OpenRouter chat completions API with a plain-text prompt.
  * @returns {Promise<string>}
  */
-async function callOpenRouter(prompt, apiKey, timeoutMs) {
+async function callOpenRouter(prompt, apiKey, timeoutMs, model) {
   if (!apiKey) throw new Error('No OpenRouter API key configured.');
 
   const controller = new AbortController();
@@ -269,7 +279,7 @@ async function callOpenRouter(prompt, apiKey, timeoutMs) {
         'X-Title': 'SmartForm Filler'
       },
       body: JSON.stringify({
-        model: 'mistral-7b-instruct',
+        model,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.3
       }),
@@ -291,6 +301,194 @@ async function callOpenRouter(prompt, apiKey, timeoutMs) {
 }
 
 // ---------------------------------------------------------------------------
+// Anthropic + OpenAI (direct API key) providers
+// ---------------------------------------------------------------------------
+
+const ANTHROPIC_API_BASE = 'https://api.anthropic.com/v1';
+const ANTHROPIC_VERSION = '2023-06-01';
+// Used only when the user saved a key but never picked a model (the settings
+// page normally saves its preselection). Fast and cheap for form filling.
+const DEFAULT_ANTHROPIC_MODEL = 'claude-haiku-5-5';
+const OPENAI_API_BASE = 'https://api.openai.com/v1';
+
+/**
+ * Build an Error for a non-2xx provider response: "<Provider> API error <status>: <message>".
+ * Both Anthropic and OpenAI return { error: { message } } bodies.
+ */
+async function providerHttpError(providerName, response) {
+  let detail = response.statusText || '';
+  try {
+    const text = await response.text();
+    if (text) {
+      detail = text;
+      try {
+        const body = JSON.parse(text);
+        if (body && body.error && body.error.message) detail = body.error.message;
+      } catch (_) { /* not JSON: keep raw text */ }
+    }
+  } catch (_) { /* body unreadable: keep statusText */ }
+  const err = new Error(`${providerName} API error ${response.status}: ${detail}`.trim());
+  err.status = response.status;
+  return err;
+}
+
+/** Re-throw fetch failures with the provider name, turning aborts into a timeout message. */
+function providerCallError(providerName, err, timeoutMs) {
+  if (err && err.name === 'AbortError') {
+    return new Error(`${providerName} request timed out after ${timeoutMs}ms`);
+  }
+  // Already formatted (providerHttpError or our own provider-named errors).
+  if (err && (err.status || String(err.message || '').startsWith(providerName))) return err;
+  return new Error(`${providerName} call failed: ${err && err.message ? err.message : String(err)}`);
+}
+
+/**
+ * Call the Anthropic Messages API with a plain-text prompt.
+ * @returns {Promise<string>} concatenated text blocks of the response.
+ */
+async function callAnthropic(prompt, apiKey, model, timeoutMs = 10000) {
+  if (!apiKey) throw new Error('No Anthropic API key configured. Add one in SmartForm settings.');
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(`${ANTHROPIC_API_BASE}/messages`, {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': ANTHROPIC_VERSION,
+        'content-type': 'application/json',
+        // Requests originate from an extension context (browser CORS rules apply).
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model: model || DEFAULT_ANTHROPIC_MODEL,
+        max_tokens: 16000,
+        messages: [{ role: 'user', content: prompt }]
+      }),
+      signal: controller.signal
+    });
+
+    if (!response.ok) throw await providerHttpError('Anthropic', response);
+
+    const data = await response.json();
+    const text = (data.content || [])
+      .filter(b => b && b.type === 'text' && typeof b.text === 'string')
+      .map(b => b.text)
+      .join('');
+    if (!text && data.stop_reason === 'refusal') {
+      throw new Error('Anthropic declined the request (stop_reason: refusal).');
+    }
+    return text;
+  } catch (err) {
+    throw providerCallError('Anthropic', err, timeoutMs);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Call the OpenAI Chat Completions API with a plain-text prompt.
+ * There is deliberately no default model: the user must pick one in settings.
+ * @returns {Promise<string>}
+ */
+async function callOpenAI(prompt, apiKey, model, timeoutMs = 10000) {
+  if (!apiKey) throw new Error('No OpenAI API key configured. Add one in SmartForm settings.');
+  if (!model) throw new Error('Select an OpenAI model in SmartForm settings');
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(`${OPENAI_API_BASE}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'user', content: prompt }]
+      }),
+      signal: controller.signal
+    });
+
+    if (!response.ok) throw await providerHttpError('OpenAI', response);
+
+    const data = await response.json();
+    return data.choices?.[0]?.message?.content || '';
+  } catch (err) {
+    throw providerCallError('OpenAI', err, timeoutMs);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/** Strip code fences / stray prose and parse the first JSON object in an LLM reply. */
+function parseJSONFromLLM(content) {
+  let text = String(content || '').trim()
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (jsonMatch) text = jsonMatch[0];
+  return JSON.parse(text);
+}
+
+/**
+ * Popup "Fill with AI" for the Anthropic / OpenAI providers: same contract as
+ * callOllamaForFormData ({success, data, modelUsed} | {success:false, error}).
+ */
+async function callCloudForFormData(provider, fields, context, settings) {
+  const fieldDescriptions = fields.map((f, i) =>
+    `${i}. Label: "${f.label}" | Name: "${f.name}" | Type: ${f.type} | Placeholder: "${f.placeholder}"`
+  ).join('\n');
+
+  const prompt = `You are an expert Australian test data generator creating realistic, consistent, privacy-safe data for web form testing.
+
+Output ONLY valid minified JSON mapping each field index (string key) to a test value string.
+
+Rules:
+- ONE consistent fictional person across the form.
+- Prefer Australian (Brisbane/QLD) data.
+- Use obviously fake values.
+- Passwords like "DevTest2026!".
+- Short professional test sentences for textareas.
+- Dates in YYYY-MM-DD.
+- No markdown, no explanations: JSON only.
+
+Context: ${context || 'Development form'}
+
+Fields:
+${fieldDescriptions}
+
+Return the JSON now:`;
+
+  const isAnthropic = provider === 'anthropic';
+  const providerName = isAnthropic ? 'Anthropic' : 'OpenAI';
+  const model = isAnthropic ? (settings.anthropicModel || DEFAULT_ANTHROPIC_MODEL) : settings.openaiModel;
+
+  try {
+    const content = isAnthropic
+      ? await callAnthropic(prompt, settings.anthropicApiKey, model, 60000)
+      : await callOpenAI(prompt, settings.openaiApiKey, model, 60000);
+    let parsed;
+    try {
+      parsed = parseJSONFromLLM(content);
+    } catch (_) {
+      throw new Error(`${providerName} returned invalid JSON.`);
+    }
+    lastAISuggestion = parsed;
+    return { success: true, data: parsed, modelUsed: model };
+  } catch (err) {
+    console.error(`[SmartForm Background] ${providerName} call failed:`, err);
+    return { success: false, error: err.message || String(err) };
+  }
+}
+
+// ---------------------------------------------------------------------------
 
 /**
  * Message listener from popup or content scripts.
@@ -298,10 +496,16 @@ async function callOpenRouter(prompt, apiKey, timeoutMs) {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === 'generateWithAI') {
     // Route based on provider saved in storage
-    chrome.storage.local.get(['provider', 'ollamaUrl', 'ollamaModel', 'openrouterApiKey', 'openrouterModel']).then(settings => {
+    chrome.storage.local.get([
+      'provider', 'ollamaUrl', 'ollamaModel', 'openrouterApiKey', 'openrouterModel',
+      'anthropicApiKey', 'anthropicModel', 'openaiApiKey', 'openaiModel'
+    ]).then(settings => {
       const provider = settings.provider || 'ollama';
 
-      if (provider === 'openrouter') {
+      if (provider === 'anthropic' || provider === 'openai') {
+        callCloudForFormData(provider, msg.fields || [], msg.context || '', settings)
+          .then(result => sendResponse(result));
+      } else if (provider === 'openrouter') {
         callOpenRouterForFormData(msg.fields || [], msg.context || '', {
           apiKey: settings.openrouterApiKey,
           model: settings.openrouterModel || msg.model
@@ -350,6 +554,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   // Generic LLM proxy for content scripts (AI field detection)
+  if (msg.action === 'openOptions') {
+    chrome.runtime.openOptionsPage();
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (msg.action === 'formStatus') {
+    setTabFormStatus(sender && sender.tab && sender.tab.id, msg.count || 0);
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (msg.action === 'aiBusy') {
+    setTabBusy(sender && sender.tab && sender.tab.id, !!msg.busy);
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (msg.action === 'callLLM') {
     callLLM(msg.prompt, msg.timeoutMs)
       .then(result => sendResponse({ result }))
@@ -395,17 +617,96 @@ async function seedProfiles(store) {
 }
 
 // Optional: on install, set some defaults
+// After install/update/reload, tabs that were already open still run the orphaned old
+// content script. Inject the current one so icons and shortcuts work without a page reload.
+async function injectIntoOpenTabs() {
+  if (!chrome.scripting || !chrome.tabs) return;
+  const files = (chrome.runtime.getManifest().content_scripts || [])[0]?.js || [];
+  const tabs = await chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] });
+  await Promise.all(tabs.map(tab =>
+    chrome.scripting.executeScript({ target: { tabId: tab.id }, files }).catch(() => {}) // restricted pages
+  ));
+}
+
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === 'install' || details.reason === 'update') {
+    injectIntoOpenTabs().catch(() => {});
     seedProfiles({ get: (k) => chrome.storage.local.get(k), set: (o) => chrome.storage.local.set(o) });
-    chrome.storage.local.set({
+    // Only fill in missing settings — an update must not reset the user's choices.
+    const defaults = {
       ollamaUrl: DEFAULT_OLLAMA_URL,
       ollamaModel: DEFAULT_OLLAMA_MODEL,
-      openrouterModel: 'qwen/qwen3-coder', // Qwen3 Coder 480B default
+      openrouterModel: DEFAULT_OPENROUTER_MODEL,
       aiEnabled: true
+    };
+    chrome.storage.local.get(Object.keys(defaults)).then(cur => {
+      const missing = {};
+      Object.keys(defaults).forEach(k => { if (cur[k] === undefined || cur[k] === '') missing[k] = defaults[k]; });
+      if (Object.keys(missing).length) chrome.storage.local.set(missing);
     });
     console.log('[SmartForm] Extension installed. Default Ollama config set.');
   }
 });
+
+// Toolbar icon colour: grey by default (manifest), full colour on tabs whose page
+// reports fillable fields ({action:'formStatus', count}).
+const ICON_IDLE = { 16: 'icons/icon-idle16.png', 32: 'icons/icon-idle32.png', 48: 'icons/icon-idle48.png' };
+const ICON_ACTIVE = { 16: 'icons/icon16.png', 32: 'icons/icon32.png', 48: 'icons/icon48.png' };
+function setTabFormStatus(tabId, count) {
+  if (!chrome.action || tabId == null) return;
+  chrome.action.setIcon({ tabId, path: count > 0 ? ICON_ACTIVE : ICON_IDLE }).catch(() => {});
+  if (!busyTimers.has(tabId)) {
+    chrome.action.setTitle({ tabId, title: count > 0
+      ? `SmartForm Filler — ${count} fillable field${count === 1 ? '' : 's'} on this page`
+      : 'SmartForm Filler — no fillable fields on this page' }).catch(() => {});
+  }
+}
+if (chrome.tabs && chrome.tabs.onUpdated) {
+  // New page load → back to grey until its content script reports fields.
+  chrome.tabs.onUpdated.addListener((tabId, info) => {
+    if (info.status === 'loading') setTabFormStatus(tabId, 0);
+  });
+}
+
+// Toolbar icon spinner while a tab's content script waits on the AI ({action:'aiBusy'}).
+const BUSY_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const busyTimers = new Map(); // tabId -> interval id
+function setTabBusy(tabId, busy) {
+  if (!chrome.action || tabId == null) return;
+  clearInterval(busyTimers.get(tabId));
+  busyTimers.delete(tabId);
+  if (!busy) {
+    chrome.action.setBadgeText({ tabId, text: '' });
+    chrome.action.setTitle({ tabId, title: 'SmartForm Filler - Scan & Prefill Forms' });
+    return;
+  }
+  let frame = 0;
+  chrome.action.setBadgeBackgroundColor({ tabId, color: '#2563eb' });
+  chrome.action.setTitle({ tabId, title: 'SmartForm Filler — AI is considering field values…' });
+  const tick = () => chrome.action.setBadgeText({ tabId, text: BUSY_FRAMES[frame++ % BUSY_FRAMES.length] })
+    .catch(() => setTabBusy(tabId, false)); // tab closed
+  tick();
+  busyTimers.set(tabId, setInterval(tick, 120));
+}
+
+// Right-click on a form field → "Fill with AI suggestion" (handled by content.js).
+const AI_FIELD_MENU_ID = 'sf-ai-suggest-field';
+if (chrome.contextMenus) {
+  chrome.runtime.onInstalled.addListener(() => {
+    chrome.contextMenus.removeAll(() => {
+      chrome.contextMenus.create({
+        id: AI_FIELD_MENU_ID,
+        title: 'SmartForm: Fill this field with AI suggestion',
+        contexts: ['editable']
+      });
+    });
+  });
+  chrome.contextMenus.onClicked.addListener((info, tab) => {
+    if (info.menuItemId !== AI_FIELD_MENU_ID || !tab || tab.id == null) return;
+    chrome.tabs.sendMessage(tab.id, { action: 'aiSuggestField' }, { frameId: info.frameId || 0 }, () => {
+      void chrome.runtime.lastError; // no content script in that frame — nothing to do
+    });
+  });
+}
 
 console.log('[SmartForm Filler] Background service worker ready.');
