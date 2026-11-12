@@ -20,7 +20,9 @@ function bootstrap(html, llm) {
   win.CSS = win.CSS || { escape: s => String(s).replace(/["\\]/g, '\\$&') }; // jsdom lacks CSS.escape
   win.chrome = makeChrome({ profiles: [PROFILE], defaultProfile: 'au-personal' });
   win.__prompts = [];
+  win.__busy = [];
   win.chrome.runtime.sendMessage = function (msg, cb) {
+    if (msg.action === 'aiBusy') { win.__busy.push(msg.busy); cb && cb({ ok: true }); return; }
     win.__prompts.push(msg.prompt);
     if (!llm) { win.chrome.runtime.lastError = { message: 'down' }; cb(null); win.chrome.runtime.lastError = null; return; }
     cb({ result: llm(msg.prompt) });
@@ -133,6 +135,84 @@ const DOB_HTML = `<!DOCTYPE html><html><body><form>
     eq(tracked, '1984-02-09', 'value written through the prototype (native) setter');
   }
 
+  section('Vue date-picker: broken label[for], DD MMM YYYY placeholder');
+  {
+    // Mirrors the vincreative signup DOB markup.
+    const html = `<!DOCTYPE html><html><body><form><section class="vc-form-group">
+      <label for="vc-signup-form__select--dob" class="vc-form__label">Date of birth</label>
+      <div class="dp-container"><div class="dp-content"><div class="input-text">
+        <input type="text" name="db-input" id="db-input" placeholder="DD MMM YYYY" autocomplete="off" class="dp-input">
+      </div></div></div></section>
+      <section><label for="em">Email</label><input id="em" name="email" type="email" /></section>
+    </form></body></html>`;
+    const win = bootstrap(html, null);
+    await win.__sfFillWithProfile('au-personal');
+    eq(win.document.querySelector('#db-input').value, '09 Feb 1984', 'DOB found via group label, rendered as DD MMM YYYY');
+    eq(win.__busy, [true, false], 'busy signal sent at start and cleared at end of fill');
+    eq(win.document.querySelectorAll('.sf-throbber').length, 0, 'no throbbers left behind');
+  }
+
+  section('Right-click on the vincreative DOB picker (reported bug: 2023-12-25 left as ISO)');
+  {
+    const html = `<!DOCTYPE html><html><body><form><section class="vc-form-group">
+      <label for="vc-signup-form__select--dob" class="vc-form__label">Date of birth</label>
+      <div class="dp-container"><div class="dp-content"><div class="input-text">
+        <input type="text" name="db-input" id="db-input" placeholder="DD MMM YYYY" autocomplete="off" class="dp-input">
+      </div></div></div>
+      <div class="form-text">Click on the Calendar to choose your day, month and year to confirm you are over 18.</div>
+    </section></form></body></html>`;
+    let answer = '2023-12-25';
+    const win = bootstrap(html, () => answer);
+    const dob = win.document.querySelector('#db-input');
+    dob.dispatchEvent(new win.MouseEvent('contextmenu', { bubbles: true }));
+
+    let res = await win.__sfAISuggestField(null);
+    ok(!res.success && /not an adult birth date/.test(res.message), 'recent date from AI rejected with a clear message');
+    eq(dob.value, '', 'rejected date not written');
+    const p = win.__prompts[win.__prompts.length - 1];
+    ok(/DATE OF BIRTH/.test(p) && /over 18/.test(p) && /DD MMM YYYY/.test(p), 'prompt flags DOB, carries help text and placeholder');
+
+    answer = '1988-06-14';
+    res = await win.__sfAISuggestField(null);
+    eq(dob.value, '14 Jun 1988', 'ISO answer rendered in the DD MMM YYYY placeholder format');
+
+    answer = 'June 3, 1979';
+    await win.__sfAISuggestField(null);
+    eq(dob.value, '03 Jun 1979', 'month-name answer normalised then formatted');
+  }
+
+  section('Field descriptions reach the model on fill-all too');
+  {
+    const html = `<!DOCTYPE html><html><body><form>
+      <section><label for="d">Date of birth</label><input id="d" name="dob" type="text" aria-describedby="dh" />
+        <small id="dh">You must be over 18</small></section>
+      <section><label for="c">Promo code</label><input id="c" name="promo" type="text" title="Six characters" />
+        <div class="vc-form__hint">Codes start with WINE</div><div class="vc-form__error">Required</div></section>
+    </form></body></html>`;
+    const win = bootstrap(html, null);
+    await win.__sfFillWithProfile('au-personal');
+    const detect = win.__prompts[0] || '';
+    ok(/You must be over 18/.test(detect), 'aria-describedby description in detection prompt');
+    ok(/Codes start with WINE/.test(detect) && /Six characters/.test(detect), 'group hint + title in detection prompt');
+    ok(!/Required/.test(detect), 'validation error text not treated as a description');
+  }
+
+  section('Checkboxes: contact toggles untouched, consent ticked');
+  {
+    const html = `<!DOCTYPE html><html><body><form>
+      <label for="em">Email</label><input id="em" name="email" type="email" />
+      <section><label>Allow us to contact you via email</label><input type="checkbox" class="switch-input" checked /></section>
+      <section><label>Allow us to contact you via phone</label><input type="checkbox" class="switch-input" /></section>
+      <label><input type="checkbox" name="terms" /> I agree to the Terms and Conditions</label>
+    </form></body></html>`;
+    const win = bootstrap(html, null);
+    await win.__sfFillWithProfile('au-personal');
+    const boxes = win.document.querySelectorAll('input[type=checkbox]');
+    eq(boxes[0].checked, true, 'contact-via-email toggle left ON (not treated as an email field)');
+    eq(boxes[1].checked, false, 'contact-via-phone toggle left OFF');
+    eq(boxes[2].checked, true, 'terms consent box ticked');
+  }
+
   section('Right-click: fill one field with an AI suggestion');
   {
     const html = `<!DOCTYPE html><html><body><form>
@@ -140,13 +220,19 @@ const DOB_HTML = `<!DOCTYPE html><html><body><form>
       <label for="d">Date of birth</label><input id="d" name="birth" type="text" placeholder="DD/MM/YYYY" />
       <label for="o">Other</label><input id="o" name="other" type="text" />
     </form></body></html>`;
-    const win = bootstrap(html, prompt => /Date of birth/.test(prompt) ? '1990-12-25' : 'Rock climbing');
+    let throbberDuringCall = 0;
+    const win = bootstrap(html, prompt => {
+      throbberDuringCall = win.document.querySelectorAll('.sf-throbber').length;
+      return /Date of birth/.test(prompt) ? '1990-12-25' : 'Rock climbing';
+    });
     const [hobby, birth, other] = win.document.querySelectorAll('input');
     hobby.dispatchEvent(new win.MouseEvent('contextmenu', { bubbles: true }));
     let res = await win.__sfAISuggestField(null);
     ok(res.success, 'suggest: succeeded for right-clicked field');
     eq(hobby.value, 'Rock climbing', 'suggest: AI value written');
     eq(other.value, '', 'suggest: other fields untouched');
+    eq(throbberDuringCall, 1, 'suggest: throbber shown beside the field while the AI works');
+    eq(win.document.querySelectorAll('.sf-throbber').length, 0, 'suggest: throbber removed afterwards');
     const p = win.__prompts[win.__prompts.length - 1];
     ok(/Favourite hobby/.test(p) && /"hobby"/.test(p) && /e\.g\. hiking/.test(p), 'suggest: prompt has label, name and placeholder');
 

@@ -144,6 +144,29 @@
     const day   = 1 + Math.floor(rng() * _daysInMonth(year, month));
     return `${year}-${_pad2(month)}-${_pad2(day)}`;
   }
+  // Normalise an AI-written date to ISO: '1985-03-07', '7 Mar 1985', 'March 7, 1985'. Else null.
+  function toISODate(str) {
+    const v = String(str || '').trim();
+    if (parseISODate(v)) return v;
+    const months = MONTH_NAMES.map(m => m.slice(0, 3).toLowerCase());
+    let m = /^(\d{1,2})[\s\-]+([a-z]{3,9})\.?[\s\-,]+(\d{4})$/i.exec(v);
+    let day, mon, year;
+    if (m) { day = +m[1]; mon = months.indexOf(m[2].slice(0, 3).toLowerCase()) + 1; year = +m[3]; }
+    else if ((m = /^([a-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})$/i.exec(v))) {
+      mon = months.indexOf(m[1].slice(0, 3).toLowerCase()) + 1; day = +m[2]; year = +m[3];
+    }
+    if (!mon || !day || day > _daysInMonth(year, mon)) return null;
+    return `${year}-${_pad2(mon)}-${_pad2(day)}`;
+  }
+  // Age in whole years on today's date for an ISO birth date (null if unparseable).
+  function ageFromISO(iso) {
+    const d = parseISODate(iso); if (!d) return null;
+    const now = new Date();
+    let age = now.getFullYear() - d.year;
+    if (now.getMonth() + 1 < d.month || (now.getMonth() + 1 === d.month && now.getDate() < d.day)) age--;
+    return age;
+  }
+
   // formatDate('1985-03-07', 'DD/MM/YYYY') → '07/03/1985'. Tokens: YYYY YY MMMM MMM MM M DD D.
   function formatDate(iso, format) {
     const d = parseISODate(iso);
@@ -246,5 +269,5 @@
   function profilesDelete(profiles, id) { return profiles.length <= 1 ? profiles : profiles.filter(p => p.id !== id); }
   function profilePatch(profiles, id, patch) { return profiles.map(p => p.id === id ? Object.assign({}, p, patch) : p); }
 
-  root.SFFormData = { FIELD_GROUPS, CANONICAL_TO_ENGINE, ENGINE_TO_CANONICAL, groupForField, toEngineValues, LOCALES, generatePerson, applyPins, MENU_ONLY, shouldFill, applyPolicy, resolveValues, PROFILES_VERSION, DEFAULT_PROFILES, profilesCreate, profilesClone, profilesRename, profilesDelete, profilePatch, CUSTOM_GENERATORS, generateCustomFieldValue, MONTH_NAMES, parseISODate, formatDate };
+  root.SFFormData = { FIELD_GROUPS, CANONICAL_TO_ENGINE, ENGINE_TO_CANONICAL, groupForField, toEngineValues, LOCALES, generatePerson, applyPins, MENU_ONLY, shouldFill, applyPolicy, resolveValues, PROFILES_VERSION, DEFAULT_PROFILES, profilesCreate, profilesClone, profilesRename, profilesDelete, profilePatch, CUSTOM_GENERATORS, generateCustomFieldValue, MONTH_NAMES, parseISODate, formatDate, toISODate, ageFromISO };
 })(typeof window !== 'undefined' ? window : globalThis);

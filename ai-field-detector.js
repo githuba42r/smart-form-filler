@@ -139,7 +139,7 @@
   // Everything the page tells us about a field — the LLM picks values from this.
   function _describeField(f) {
     var out = { name: f.name || f.htmlName, type: f.type || f.htmlType, label: f.label };
-    ['ariaLabel', 'placeholder', 'context', 'options', 'maxLength', 'min', 'max', 'pattern', 'required']
+    ['ariaLabel', 'placeholder', 'context', 'hint', 'options', 'maxLength', 'min', 'max', 'pattern', 'required']
       .forEach(function (k) {
         var v = f[k];
         if (v !== undefined && v !== null && v !== '' && !(Array.isArray(v) && !v.length)) out[k] = v;
@@ -370,6 +370,12 @@
       .replace(/^["'`]+|["'`]+$/g, '')
       .trim();
     if (_isJunkValue(v, field)) return '';
+    var F = root.SFFormData;
+    if (F && F.toISODate && _isBirthField(field)) {
+      // Birth dates must be real dates for an adult; normalised to ISO for per-field formatting.
+      var iso = F.toISODate(v), age = iso ? F.ageFromISO(iso) : null;
+      return (age !== null && age >= 18 && age <= 100) ? iso : '';
+    }
     if (Array.isArray(field.options) && field.options.length) {
       var match = field.options.find(function (o) { return String(o).toLowerCase() === v.toLowerCase(); });
       return match !== undefined ? String(match) : '';
@@ -380,13 +386,22 @@
     return v;
   }
 
+  function _isBirthField(field) {
+    return BIRTH_RE.test(_spaced([field.label, field.htmlName || field.name, field.placeholder,
+      field.context, field.hint, field.detectedType].join(' ')));
+  }
+
   function _buildValuePrompt(field) {
+    var birth = _isBirthField(field)
+      ? ' This is a DATE OF BIRTH: return a birth date for an adult aged between 21 and 75 ' +
+        '(not a recent or future date), as YYYY-MM-DD.'
+      : '';
     return 'You are filling a web form with realistic test data. Choose a value for this field ' +
-      'based on what its label and name ask for:\n' +
+      'based on what its label, name, placeholder and help text ask for:\n' +
       JSON.stringify(_describeField(field), null, 2) + '\n\n' +
       'Rules: return ONLY the value, with no quotes or explanation. If options are listed, return one ' +
       'of them exactly. Respect maxLength/min/max/pattern. Dates as YYYY-MM-DD. Never return ' +
-      'placeholder text such as "test", "text_custom" or the field name.';
+      'placeholder text such as "test", "text_custom" or the field name.' + birth;
   }
 
   function _isoToday(offsetDays) {
@@ -489,7 +504,10 @@
     return _callLLM(prompt).then(function (response) {
       if (!response || !response.result) return { error: (response && response.error) || 'No response from AI' };
       var value = _acceptValue(response.result, field);
-      return value ? { value: value } : { error: 'AI did not return a usable value' };
+      if (value) return { value: value };
+      return { error: _isBirthField(field)
+        ? 'AI suggested "' + String(response.result).trim().slice(0, 40) + '", which is not an adult birth date'
+        : 'AI did not return a usable value' };
     });
   }
 

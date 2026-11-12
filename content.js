@@ -56,7 +56,17 @@
       if (text) return text;
     }
 
-    // 5. Nearby previous sibling that looks like a label
+    // 5. A <label> in the control's own group whose `for` is broken or missing —
+    //    e.g. <label for="x--dob"> beside a date-picker input with id="db-input".
+    let group = el.parentElement;
+    for (let depth = 0; group && depth < 5 && group !== document.body; depth++, group = group.parentElement) {
+      if (group.querySelectorAll(FILLABLE_SELECTOR).length > 1) break; // reached a container of several fields
+      const label = Array.from(group.querySelectorAll('label')).find(l =>
+        !l.contains(el) && !(l.htmlFor && document.getElementById(l.htmlFor)) && l.textContent.trim());
+      if (label) return label.textContent.trim();
+    }
+
+    // 6. Nearby previous sibling that looks like a label
     let sibling = el.previousElementSibling;
     let attempts = 0;
     while (sibling && attempts < 4) {
@@ -74,7 +84,7 @@
       attempts++;
     }
 
-    // 6. Placeholder or name/id cleaned up
+    // 7. Placeholder or name/id cleaned up
     if (el.placeholder && el.placeholder.trim().length > 2) {
       return el.placeholder.trim();
     }
@@ -117,6 +127,31 @@
       .map(o => o.textContent.trim());
   }
 
+  // Elements that carry a field's description / help text (not validation errors).
+  const HELP_SELECTOR = '.form-text, .help-block, .help-text, .hint, .description, .field-description, ' +
+    '[class*="__hint"], [class*="__help"], [class*="-help"], [class*="helper"], [class*="description"], small';
+
+  /**
+   * All descriptive text attached to a control: aria-describedby targets, its title, and
+   * help/hint/description elements in its own group (e.g. "…to confirm you are over 18"
+   * under a DOB picker). Passed to the AI so values honour the stated requirements.
+   */
+  function getHelpText(el) {
+    const parts = [];
+    const add = t => { t = (t || '').replace(/\s+/g, ' ').trim(); if (t && parts.indexOf(t) === -1) parts.push(t); };
+    ((el.getAttribute && el.getAttribute('aria-describedby')) || '').split(/\s+/).filter(Boolean)
+      .forEach(id => { const n = document.getElementById(id); if (n) add(n.textContent); });
+    if (el.title) add(el.title);
+    let group = el.parentElement;
+    for (let depth = 0; group && depth < 5 && group !== document.body; depth++, group = group.parentElement) {
+      if (group.querySelectorAll(FILLABLE_SELECTOR).length > 1) break;
+      group.querySelectorAll(HELP_SELECTOR).forEach(n => {
+        if (!n.contains(el) && !/error|invalid/i.test(n.className || '')) add(n.textContent);
+      });
+    }
+    return parts.join(' ').slice(0, 300);
+  }
+
   /**
    * Everything the page says about a control: label, name, placeholder, group context,
    * options and constraints. Feeds both the heuristics and the AI value choice.
@@ -130,6 +165,8 @@
       placeholder: el.placeholder || '',
       context: getGroupLabel(el)
     };
+    const hint = getHelpText(el);
+    if (hint) d.hint = hint;
     const options = selectOptionTexts(el);
     if (options.length) d.options = options.slice(0, 40);
     if (el.maxLength > 0) d.maxLength = el.maxLength;
@@ -182,7 +219,7 @@
     if (type === 'datetime-local') return 'YYYY-MM-DDT09:00';
     if (type === 'month') return 'YYYY-MM';
     const hint = `${field.placeholder} ${field.label} ${el.getAttribute('data-format') || ''}`;
-    const m = /\b(dd?|mm?|yy(?:yy)?)([\/\-. ])(dd?|mm?)\2(yy(?:yy)?|dd?)\b/i.exec(hint);
+    const m = /\b(d{1,2}|m{1,4}|y{2}(?:y{2})?)([\/\-. ])(d{1,2}|m{1,4})\2(y{2}(?:y{2})?|d{1,2})\b/i.exec(hint);
     if (m) return m[0].toUpperCase();
     return country === 'US' ? 'MM/DD/YYYY' : 'DD/MM/YYYY';
   }
@@ -729,6 +766,15 @@
    * re-asserted afterwards — replicating the form's manual address-entry path.
    */
   async function fillWithProfile(profileKey, opts = {}) {
+    setBusy(true);
+    try {
+      return await fillWithProfileNow(profileKey, opts);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function fillWithProfileNow(profileKey, opts = {}) {
     const F = window.SFFormData;
     const profile = await loadProfile(profileKey);
 
@@ -989,9 +1035,9 @@
     entries.forEach(function (entry) {
       const el = entry.el;
       if (!el || !el.isConnected || entry.value === undefined || entry.value === null) return;
-      const finalValue = (entry.detectedType === 'dob' || entry.detectedType === 'date')
-        ? adaptDateValue(el, describeControl(el), entry.value, country)
-        : entry.value;
+      const isDate = entry.detectedType === 'dob' || entry.detectedType === 'date';
+      const iso = isDate ? window.SFFormData.toISODate(entry.value) : null;
+      const finalValue = iso ? adaptDateValue(el, describeControl(el), iso, country) : entry.value;
       if (applyValueToElement(el, finalValue)) filledCount++;
     });
     return filledCount;
@@ -1057,7 +1103,23 @@
       // The LLM sometimes misses split DOB parts (Day / Month / Year); the page's wording wins.
       if (aiField.detectedType !== 'dob' && isBirthField(dom)) aiField.detectedType = 'dob';
       aiField.htmlName = dom.name;
-      const value = await resolveFieldValue(aiField, activeProfile, opts, standardValues);
+      // Checkboxes/radios follow the same rule as the heuristic path: tick consent boxes,
+      // leave everything else (contact-preference toggles, "same as billing") untouched.
+      const ctlType = (allControls[idx].type || '').toLowerCase();
+      if (ctlType === 'checkbox' || ctlType === 'radio') {
+        if (ctlType === 'checkbox' && !allControls[idx].checked && checkboxPolicy(dom) === 'check') {
+          entries.push({ el: allControls[idx], value: 'true', detectedType: 'consent' });
+        }
+        continue;
+      }
+      const aiChooses = !(F.CANONICAL_TO_ENGINE && F.CANONICAL_TO_ENGINE[aiField.detectedType]);
+      const stopThrobber = aiChooses ? showFieldThrobber(allControls[idx]) : null;
+      let value;
+      try {
+        value = await resolveFieldValue(aiField, activeProfile, opts, standardValues);
+      } finally {
+        if (stopThrobber) stopThrobber();
+      }
       dbg('ai field', dom.name, JSON.stringify(dom.label), '→', aiField.detectedType, '=', JSON.stringify(value));
       if (value !== undefined) entries.push({ el: allControls[idx], value: value, detectedType: aiField.detectedType });
     }
@@ -1071,6 +1133,89 @@
     };
   }
 
+
+  // ============================================================
+  // Busy indicators while the AI considers field values: spinning ring on the
+  // ✨ form icons, a badge spinner on the toolbar icon (background.js) and a
+  // small throbber beside each field being populated.
+  // ============================================================
+  const BUSY_ATTR = 'data-sf-busy';
+  let busyCount = 0;
+
+  function ensureBusyStyles() {
+    if (document.getElementById('sf-busy-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'sf-busy-styles';
+    style.setAttribute(SF_UI_ATTR, '');
+    style.textContent = `
+      @keyframes sf-spin { to { transform: rotate(360deg); } }
+      button[${SF_UI_ATTR}][${BUSY_ATTR}] { cursor: progress !important; }
+      button[${SF_UI_ATTR}][${BUSY_ATTR}]::after {
+        content: ""; position: absolute; inset: -4px; border-radius: 50%; pointer-events: none;
+        border: 3px solid rgba(37, 99, 235, 0.25); border-top-color: #2563eb; border-right-color: #60a5fa;
+        animation: sf-spin 0.8s linear infinite; box-sizing: border-box;
+      }
+      .sf-throbber {
+        position: fixed; z-index: 2147483646; width: 16px; height: 16px; margin: 0; padding: 0;
+        border-radius: 50%; border: 2px solid rgba(37, 99, 235, 0.25); border-top-color: #2563eb;
+        box-sizing: border-box; pointer-events: none; animation: sf-spin 0.7s linear infinite;
+      }
+      .sf-mini-spin {
+        display: inline-block; width: 12px; height: 12px; margin-right: 8px; vertical-align: -2px;
+        border-radius: 50%; border: 2px solid rgba(37, 99, 235, 0.25); border-top-color: #2563eb;
+        box-sizing: border-box; animation: sf-spin 0.7s linear infinite;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        button[${SF_UI_ATTR}][${BUSY_ATTR}]::after, .sf-throbber, .sf-mini-spin { animation-duration: 2.4s; }
+      }`;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  // Reference-counted: nested fills (e.g. right-click during fill-all) stay busy until all finish.
+  function setBusy(on) {
+    busyCount = Math.max(0, busyCount + (on ? 1 : -1));
+    const busy = busyCount > 0;
+    if (busy) ensureBusyStyles();
+    formButtons.forEach(({ btn }) => {
+      if (busy) {
+        btn.setAttribute(BUSY_ATTR, '');
+        btn.title = 'SmartForm is asking the AI for field values…';
+      } else {
+        btn.removeAttribute(BUSY_ATTR);
+        btn.title = 'Scan this form with SmartForm Filler';
+      }
+    });
+    try {
+      if (chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({ action: 'aiBusy', busy }, () => { void chrome.runtime.lastError; });
+      }
+    } catch (_) { /* extension context gone (reloaded) — on-page indicators still work */ }
+  }
+
+  // Small spinner just inside the right edge of a field. Returns a stop() function.
+  function showFieldThrobber(el) {
+    if (!el || !el.getBoundingClientRect) return function () {};
+    ensureBusyStyles();
+    const t = document.createElement('div');
+    t.className = 'sf-throbber';
+    t.setAttribute(SF_UI_ATTR, '');
+    t.setAttribute('role', 'status');
+    t.setAttribute('aria-label', 'SmartForm is choosing a value');
+    const place = () => {
+      const r = el.getBoundingClientRect();
+      t.style.left = Math.max(0, r.right - 24) + 'px';
+      t.style.top = (r.top + Math.max(0, (r.height - 16) / 2)) + 'px';
+    };
+    place();
+    document.body.appendChild(t);
+    window.addEventListener('scroll', place, true);
+    window.addEventListener('resize', place);
+    return function stop() {
+      window.removeEventListener('scroll', place, true);
+      window.removeEventListener('resize', place);
+      t.remove();
+    };
+  }
 
   // ============================================================
   // Right-click → "Fill this field with AI suggestion"
@@ -1095,15 +1240,24 @@
     }
     const d = describeControl(el);
     showToast('Asking AI for “' + d.label + '”…');
-    const res = await window.SFAIDetector.suggestFieldValue(Object.assign({}, d, {
-      htmlName: d.name, htmlType: d.type, currentValue: el.value || ''
-    }));
+    const stopThrobber = showFieldThrobber(el);
+    setBusy(true);
+    let res;
+    try {
+      res = await window.SFAIDetector.suggestFieldValue(Object.assign({}, d, {
+        htmlName: d.name, htmlType: d.type, currentValue: el.value || ''
+      }));
+    } finally {
+      stopThrobber();
+      setBusy(false);
+    }
     if (res.error) {
       showToast('AI suggestion failed: ' + res.error);
       return { success: false, message: res.error };
     }
     const isDate = isBirthField(d) || /^(date|datetime-local|month)$/.test((el.type || '').toLowerCase());
-    const value = isDate ? adaptDateValue(el, d, res.value, (await loadProfile(null)).country) : res.value;
+    const iso = isDate ? window.SFFormData.toISODate(res.value) : null;
+    const value = iso ? adaptDateValue(el, d, iso, (await loadProfile(null)).country) : res.value;
     const ok = applyValueToElement(el, value);
     showToast(ok ? 'AI filled “' + d.label + '”' : 'Could not fill “' + d.label + '”');
     return { success: ok, value: value };
@@ -1256,6 +1410,7 @@
     });
 
     const header = document.createElement('div');
+    header.setAttribute('data-role', 'header');
     header.textContent = `${scanResult.fieldCount} field${scanResult.fieldCount === 1 ? '' : 's'} • ${scanResult.scopeName}`;
     Object.assign(header.style, { fontSize: '11px', color: '#64748b', padding: '4px 8px 6px', fontWeight: '600' });
     fillMenu.appendChild(header);
@@ -1272,7 +1427,7 @@
         el.addEventListener('mouseleave', () => { el.style.background = 'transparent'; });
 
         if (el.hasAttribute('data-only')) {
-          el.addEventListener('click', (e) => { e.stopPropagation(); runMenuAction(__sfMenuOnlyFor(el.getAttribute('data-only')), profileSel.value); });
+          el.addEventListener('click', (e) => { e.stopPropagation(); runMenuAction(__sfMenuOnlyFor(el.getAttribute('data-only')), profileSel.value, el); });
         } else if (el.hasAttribute('data-action') && el.getAttribute('data-action') === 'clear') {
           el.addEventListener('click', (e) => { e.stopPropagation(); clearDetected(); closeFillMenu(); showToast('Cleared detected fields'); });
         }
@@ -1301,7 +1456,27 @@
     setTimeout(() => document.addEventListener('click', onDocClickForMenu, true), 0);
   }
 
-  function runMenuAction(only, profileId) {
+  // Lock the menu while the AI works: spinner on the chosen action, everything else disabled.
+  function setMenuBusy(actionBtn) {
+    if (!fillMenu) return;
+    ensureBusyStyles();
+    fillMenu.style.cursor = 'progress';
+    fillMenu.querySelectorAll('button, select').forEach(c => { c.disabled = true; c.style.opacity = c === actionBtn ? '1' : '0.45'; });
+    const header = fillMenu.querySelector('[data-role="header"]');
+    if (header) header.textContent = 'AI is considering field values…';
+    if (actionBtn) {
+      const label = actionBtn.textContent;
+      actionBtn.textContent = '';
+      const spin = document.createElement('span');
+      spin.className = 'sf-mini-spin';
+      actionBtn.appendChild(spin);
+      actionBtn.appendChild(document.createTextNode(label + ' — asking AI…'));
+      actionBtn.style.background = '#eff6ff';
+    }
+  }
+
+  function runMenuAction(only, profileId, actionBtn) {
+    setMenuBusy(actionBtn);
     const res = fillWithProfile(profileId, { only, unique: true });
     if (res && res.then) {
       // fillWithProfile is async

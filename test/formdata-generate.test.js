@@ -46,5 +46,10 @@ eq(F.formatDate('1985-03-07', 'MM/DD/YYYY'), '03/07/1985', 'formatDate MM/DD/YYY
 eq(F.formatDate('1985-03-07', 'D MMM YYYY'), '7 Mar 1985', 'formatDate D MMM YYYY');
 eq(F.formatDate('1985-03-07', 'DD.MM.YY'), '07.03.85', 'formatDate DD.MM.YY');
 eq(F.formatDate('not-a-date', 'DD/MM/YYYY'), 'not-a-date', 'formatDate passes non-ISO through');
+eq(F.toISODate('7 Mar 1985'), '1985-03-07', 'toISODate D MMM YYYY');
+eq(F.toISODate('March 7, 1985'), '1985-03-07', 'toISODate MMMM D, YYYY');
+eq(F.toISODate('1985-03-07'), '1985-03-07', 'toISODate ISO passthrough');
+eq(F.toISODate('31 Feb 1985'), null, 'toISODate rejects impossible dates');
+ok(F.ageFromISO('2000-01-01') >= 25, 'ageFromISO');
 
 done('formdata-generate');

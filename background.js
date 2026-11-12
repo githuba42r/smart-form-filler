@@ -353,6 +353,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   // Generic LLM proxy for content scripts (AI field detection)
+  if (msg.action === 'aiBusy') {
+    setTabBusy(sender && sender.tab && sender.tab.id, !!msg.busy);
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (msg.action === 'callLLM') {
     callLLM(msg.prompt, msg.timeoutMs)
       .then(result => sendResponse({ result }))
@@ -416,6 +422,27 @@ chrome.runtime.onInstalled.addListener((details) => {
     console.log('[SmartForm] Extension installed. Default Ollama config set.');
   }
 });
+
+// Toolbar icon spinner while a tab's content script waits on the AI ({action:'aiBusy'}).
+const BUSY_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const busyTimers = new Map(); // tabId -> interval id
+function setTabBusy(tabId, busy) {
+  if (!chrome.action || tabId == null) return;
+  clearInterval(busyTimers.get(tabId));
+  busyTimers.delete(tabId);
+  if (!busy) {
+    chrome.action.setBadgeText({ tabId, text: '' });
+    chrome.action.setTitle({ tabId, title: 'SmartForm Filler - Scan & Prefill Forms' });
+    return;
+  }
+  let frame = 0;
+  chrome.action.setBadgeBackgroundColor({ tabId, color: '#2563eb' });
+  chrome.action.setTitle({ tabId, title: 'SmartForm Filler — AI is considering field values…' });
+  const tick = () => chrome.action.setBadgeText({ tabId, text: BUSY_FRAMES[frame++ % BUSY_FRAMES.length] })
+    .catch(() => setTabBusy(tabId, false)); // tab closed
+  tick();
+  busyTimers.set(tabId, setInterval(tick, 120));
+}
 
 // Right-click on a form field → "Fill with AI suggestion" (handled by content.js).
 const AI_FIELD_MENU_ID = 'sf-ai-suggest-field';
