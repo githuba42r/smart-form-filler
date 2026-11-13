@@ -249,5 +249,30 @@ const DOB_HTML = `<!DOCTYPE html><html><body><form>
     ok(!res.success && down.document.querySelector('input').value === '', 'suggest: AI down → no fallback value written');
   }
 
+  section('Checkout DOB picker under a heading, no <label> (reported: not filled; right-click left ISO)');
+  for (const placeholder of ['DD MMM YYYY', 'Date of Birth']) {
+    const html = `<!DOCTYPE html><html><body><form>
+      <h3>Purchase Order Number</h3><input name="po_number" placeholder="Purchase Order Number" />
+      <h3>Date of Birth</h3>
+      <div class="dp-container vc-form__datepicker" placeholder="DD MMM YYYY"><div class="dp-content"><div class="input-text">
+        <input type="text" name="db-input" id="db-input" placeholder="${placeholder}" autocomplete="off" class="dp-input">
+      </div></div></div>
+      <p class="form-text">Click on the Calendar to choose your day, month and year to confirm you are over 18.</p>
+    </form></body></html>`;
+    const tag = `(placeholder "${placeholder}")`;
+    for (const llm of [null, p => /DATE OF BIRTH/.test(p) ? '2005-06-15' : '[]']) {
+      const win = bootstrap(html, llm);
+      await win.__sfFillWithProfile('au-personal');
+      eq(win.document.querySelector('#db-input').value, '09 Feb 1984',
+        `fill all: DOB filled in the picker's format ${tag} ${llm ? '(AI up)' : '(AI down)'}`);
+    }
+    const win = bootstrap(html, p => /DATE OF BIRTH/.test(p) ? '2005-06-15' : 'x');
+    const dob = win.document.querySelector('#db-input');
+    dob.dispatchEvent(new win.MouseEvent('contextmenu', { bubbles: true }));
+    await win.__sfAISuggestField(null);
+    eq(dob.value, '15 Jun 2005', `right-click: AI date rendered in the picker's format ${tag}`);
+    ok(/"label": "Date of Birth"/.test(win.__prompts[0]), `heading passed to the AI as the label ${tag}`);
+  }
+
   done('content-dob-fill');
 })();

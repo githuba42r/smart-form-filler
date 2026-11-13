@@ -400,9 +400,13 @@
     return v;
   }
 
+  // "…confirm you are over 18" under a date field means a birth date.
+  var ADULT_RE = /\b(over|at least|older than|aged?)\s*(the age of\s*)?1[6-9]\b/;
   function _isBirthField(field) {
-    return BIRTH_RE.test(_spaced([field.label, field.htmlName || field.name, field.placeholder,
-      field.context, field.hint, field.detectedType].join(' ')));
+    var text = _spaced([field.label, field.htmlName || field.name, field.placeholder,
+      field.context, field.hint, field.detectedType].join(' '));
+    return BIRTH_RE.test(text) || (ADULT_RE.test(text) &&
+      /\bdate\b|calendar|\b(dd|mm|yyyy)\b|^date/.test(text + ' ' + (field.htmlType || field.type || '')));
   }
 
   function _buildValuePrompt(field) {
