@@ -7,15 +7,24 @@
     name:    ['firstname', 'lastname', 'fullname', 'username'],
     contact: ['email', 'phone'],
     address: ['street1', 'street2', 'city', 'state', 'zip', 'country'],
-    account: ['password', 'dob'],
+    account: ['password', 'dob', 'gender'],
     misc:    ['business', 'genericText']
   };
   const CANONICAL_TO_ENGINE = {
     firstname:'firstName', lastname:'lastName', fullname:'fullName', username:'username',
     email:'email', phone:'phone',
     street1:'address1', street2:'address2', city:'city', state:'state', zip:'postcode', country:'country',
-    password:'password', dob:'dob', business:'company', genericText:'genericText'
+    password:'password', dob:'dob', gender:'gender', business:'company', genericText:'genericText'
   };
+  // Editor labels for the known fields (address labels come from the country's schema).
+  const FIELD_LABELS = {
+    firstname:'First name', lastname:'Last name', fullname:'Full name', username:'Username',
+    email:'Email', emailDomain:'Email domain', phone:'Phone',
+    street1:'Street address', street2:'Address line 2', city:'City', state:'State', zip:'Postcode', country:'Country',
+    password:'Password', dob:'Date of birth', gender:'Gender / sex',
+    business:'Company', genericText:'Free text (comments, notes)'
+  };
+  const GENDERS = ['Male', 'Female'];
   const ENGINE_TO_CANONICAL = Object.keys(CANONICAL_TO_ENGINE)
     .reduce((acc, k) => { acc[CANONICAL_TO_ENGINE[k]] = k; return acc; }, {});
   const _GROUP_OF = (function () {
@@ -88,6 +97,67 @@
       if (Object.prototype.hasOwnProperty.call(CANONICAL_TO_ENGINE, key)) out[key] = v;
     });
     return out;
+  }
+
+  // Per-field mode: 'random' (generated each fill), 'fixed' (the pinned value) or 'skip'.
+  // Profiles without fieldModes derive it from the older exclude list and pins.
+  const FIELD_MODES = ['random', 'fixed', 'skip'];
+  function fieldMode(profile, key) {
+    const modes = (profile && profile.fieldModes) || {};
+    if (FIELD_MODES.indexOf(modes[key]) !== -1) return modes[key];
+    const exclude = (profile && profile.policy && profile.policy.exclude) || [];
+    if (exclude.indexOf(key) !== -1) return 'skip';
+    const pins = (profile && profile.pins) || {};
+    return pins[key] != null && pins[key] !== '' ? 'fixed' : 'random';
+  }
+  // Pins that apply on this fill: fields set to 'random' ignore their stored value.
+  function effectivePins(profile) {
+    const pins = (profile && profile.pins) || {};
+    const out = {};
+    Object.keys(pins).forEach(k => { if (fieldMode(profile, k) === 'fixed') out[k] = pins[k]; });
+    return out;
+  }
+  // Patch for a mode change; keeps policy.exclude in step so the fill gate sees 'skip'.
+  function setFieldMode(profile, key, mode) {
+    const policy = Object.assign({ groups: {}, exclude: [] }, profile.policy);
+    const exclude = (policy.exclude || []).filter(k => k !== key);
+    if (mode === 'skip') exclude.push(key);
+    return {
+      fieldModes: Object.assign({}, profile.fieldModes, { [key]: mode }),
+      policy: Object.assign({}, policy, { exclude })
+    };
+  }
+
+  // Custom fields: profile-specific fields matched by label / name hints, e.g.
+  //   { id, label:'Delivery instructions', labelHint:'delivery, instructions', nameHint:'delivery_notes',
+  //     mode:'fixed'|'random'|'skip', value:'Leave at the door' }
+  // Hints are comma-separated phrases; any phrase found in the field's label (or name) is a match.
+  // With no hints, the custom field's own label is the label hint.
+  function _words(str) {
+    return ' ' + String(str || '').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ').trim() + ' ';
+  }
+  function _phrases(hint) {
+    return String(hint || '').split(',').map(_words).filter(p => p.trim());
+  }
+  function customFieldMatches(cf, field) {
+    if (!cf || !field) return false;
+    let labelHints = _phrases(cf.labelHint);
+    const nameHints = _phrases(cf.nameHint);
+    if (!labelHints.length && !nameHints.length) labelHints = _phrases(cf.label);
+    const labelText = _words([field.label, field.ariaLabel, field.placeholder].join(' '));
+    const nameText = _words([field.name, field.htmlName, field.id].join(' '));
+    return labelHints.some(p => labelText.indexOf(p) !== -1) ||
+      nameHints.some(p => nameText.indexOf(p) !== -1);
+  }
+  function matchCustomField(profile, field) {
+    const list = (profile && profile.customFields) || [];
+    return list.find(cf => customFieldMatches(cf, field)) || null;
+  }
+  function newCustomField(profile, label) {
+    const taken = {}; ((profile && profile.customFields) || []).forEach(c => { taken[c.id] = true; });
+    let n = 1; while (taken['cf' + n]) n++;
+    return { id: 'cf' + n, label: label || '', labelHint: '', nameHint: '', mode: 'fixed', value: '' };
   }
 
   const MENU_ONLY = { name:['name','contact'], address:['address'],
@@ -192,19 +262,24 @@
     const streetNo  = 1 + Math.floor(rng() * 998);
     const domain    = _pick(rng, L.emailDomains);
     const tag       = Math.floor(rng() * 9000) + 1000;
+    const dob       = _dob(rng);
+    const gender    = _pick(rng, GENDERS);
+    // Fixed names feed the derived fields (full name, username, email) unless those are fixed too.
+    const pins = effectivePins(profile);
+    const first = pins.firstname || firstname, last = pins.lastname || lastname;
     const person = {
-      firstname, lastname, fullname: `${firstname} ${lastname}`,
-      username: `${_slug(firstname)}_${_slug(lastname)}${tag}`,
-      email: `${_slug(firstname)}.${_slug(lastname)}.${tag}@${domain}`,
+      firstname, lastname, fullname: `${first} ${last}`,
+      username: `${_slug(first)}_${_slug(last)}${tag}`,
+      email: `${_slug(first)}.${_slug(last)}.${tag}@${domain}`,
       phone: _digits(rng, L.phoneTemplate),
       street1: `${streetNo} ${_pick(rng, L.streets)}`, street2: '',
       city: row.city, state: row.state, zip, country,
       password: `Dev${tag}!aZ`,
-      dob: _dob(rng),
-      business: `${lastname} ${_pick(rng, ['Holdings','Labs','Group','Trading'])} Pty Ltd`,
+      dob, gender,
+      business: `${last} ${_pick(rng, ['Holdings','Labs','Group','Trading'])} Pty Ltd`,
       genericText: 'Automated test input generated for development and QA validation.'
     };
-    return applyPins(person, profile && profile.pins);
+    return applyPins(person, pins);
   }
 
   // Custom field value generators for domain-specific / unknown field types.
@@ -269,5 +344,5 @@
   function profilesDelete(profiles, id) { return profiles.length <= 1 ? profiles : profiles.filter(p => p.id !== id); }
   function profilePatch(profiles, id, patch) { return profiles.map(p => p.id === id ? Object.assign({}, p, patch) : p); }
 
-  root.SFFormData = { FIELD_GROUPS, CANONICAL_TO_ENGINE, ENGINE_TO_CANONICAL, groupForField, toEngineValues, LOCALES, generatePerson, applyPins, MENU_ONLY, shouldFill, applyPolicy, resolveValues, PROFILES_VERSION, DEFAULT_PROFILES, profilesCreate, profilesClone, profilesRename, profilesDelete, profilePatch, CUSTOM_GENERATORS, generateCustomFieldValue, MONTH_NAMES, parseISODate, formatDate, toISODate, ageFromISO };
+  root.SFFormData = { FIELD_LABELS, GENDERS, FIELD_MODES, fieldMode, effectivePins, setFieldMode, customFieldMatches, matchCustomField, newCustomField, FIELD_GROUPS, CANONICAL_TO_ENGINE, ENGINE_TO_CANONICAL, groupForField, toEngineValues, LOCALES, generatePerson, applyPins, MENU_ONLY, shouldFill, applyPolicy, resolveValues, PROFILES_VERSION, DEFAULT_PROFILES, profilesCreate, profilesClone, profilesRename, profilesDelete, profilePatch, CUSTOM_GENERATORS, generateCustomFieldValue, MONTH_NAMES, parseISODate, formatDate, toISODate, ageFromISO };
 })(typeof window !== 'undefined' ? window : globalThis);

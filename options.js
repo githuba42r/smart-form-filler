@@ -1231,155 +1231,295 @@ document.addEventListener('DOMContentLoaded', async () => {
     editor.style.display = 'block';
     if (noSelected) noSelected.style.display = 'none';
 
-    // Country selector
-    const countryWrap = document.createElement('div');
-    countryWrap.style.cssText = 'margin-bottom: 20px;';
-    const countryLabel = document.createElement('label');
-    countryLabel.textContent = 'Country';
-    countryLabel.style.display = 'block';
-    const countrySelect = document.createElement('select');
-    countrySelect.style.cssText = 'width: 100%; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 8px; margin-bottom: 0;';
+    const F = SFFormData;
+    const cur = () => profiles.find(p => p.id === id) || profile;
+    const save = async (patch) => {
+      profiles = F.profilePatch(profiles, id, patch);
+      await persistProfiles();
+    };
+    const el = (tag, cls, text) => {
+      const n = document.createElement(tag);
+      if (cls) n.className = cls;
+      if (text != null) n.textContent = text;
+      return n;
+    };
 
+    // Country
+    const top = el('div', 'pe-top');
+    const countryWrap = el('div');
+    const countryLabel = el('label', null, 'Country');
+    countryLabel.htmlFor = 'peCountry';
+    const countrySelect = el('select');
+    countrySelect.id = 'peCountry';
     if (typeof SFAddress !== 'undefined') {
-      const countries = SFAddress.listCountries();
-      countries.forEach(country => {
-        const opt = document.createElement('option');
+      SFAddress.listCountries().forEach(country => {
+        const opt = el('option', null, country.label);
         opt.value = country.code;
-        opt.textContent = country.label;
         if (profile.country === country.code) opt.selected = true;
         countrySelect.appendChild(opt);
       });
     }
-
     countrySelect.addEventListener('change', async () => {
-      profiles = SFFormData.profilePatch(profiles, id, { country: countrySelect.value });
-      await persistProfiles();
-      // Re-render address fields
-      renderAddressFieldsInEditor();
+      await save({ country: countrySelect.value });
+      renderEditor(id); // address labels and sample values follow the country
     });
-
     countryWrap.appendChild(countryLabel);
     countryWrap.appendChild(countrySelect);
-    editor.appendChild(countryWrap);
+    top.appendChild(countryWrap);
+    editor.appendChild(top);
 
-    // Group toggles (name, contact, address, account, misc)
-    if (typeof SFFormData !== 'undefined') {
-      const groupsWrap = document.createElement('div');
-      groupsWrap.style.cssText = 'margin-bottom: 20px;';
-      const groupsLabel = document.createElement('label');
-      groupsLabel.textContent = 'Field Groups';
-      groupsLabel.style.display = 'block';
-      groupsLabel.style.marginBottom = '12px';
-      groupsWrap.appendChild(groupsLabel);
+    const help = el('p', 'muted pe-help',
+      'Random: a new value on every fill. Fixed: always this value. Skip: leave the field alone. ' +
+      'Fixed names carry into the generated full name, username and email.');
+    editor.appendChild(help);
 
-      const policy = profile.policy || {};
-      const groups = policy.groups || {};
-      Object.keys(SFFormData.FIELD_GROUPS).forEach(groupKey => {
-        const toggle = document.createElement('div');
-        toggle.style.cssText = 'display: flex; align-items: center; gap: 8px; margin-bottom: 8px;';
-        const checkbox = document.createElement('input');
-        checkbox.type = 'checkbox';
-        checkbox.id = `group-${groupKey}`;
-        checkbox.checked = groups[groupKey] !== false;
-        checkbox.addEventListener('change', async () => {
-          const newPolicy = {
-            ...policy,
-            groups: { ...groups, [groupKey]: checkbox.checked }
-          };
-          profiles = SFFormData.profilePatch(profiles, id, { policy: newPolicy });
-          await persistProfiles();
-        });
-        const label = document.createElement('label');
-        label.htmlFor = `group-${groupKey}`;
-        label.textContent = groupKey;
-        label.style.marginBottom = '0';
-        toggle.appendChild(checkbox);
-        toggle.appendChild(label);
-        groupsWrap.appendChild(toggle);
+    // Sample of what "Random" produces for this profile's country (fixed seed so it is stable).
+    const sample = F.generatePerson({ country: profile.country || 'AU' }, { seed: 7 });
+    sample.emailDomain = String(sample.email).split('@')[1];
+    const PLACEHOLDERS = { dob: 'YYYY-MM-DD', gender: 'e.g. Female, Male, Non-binary' };
+
+    const MODE_TEXT = { random: 'Random', fixed: 'Fixed', skip: 'Skip' };
+    function modeSeg(modes, current, onPick) {
+      const seg = el('div', 'seg');
+      seg.setAttribute('role', 'group');
+      modes.forEach(m => {
+        const b = el('button', m === current ? 'active' : '', MODE_TEXT[m]);
+        b.type = 'button';
+        b.dataset.mode = m;
+        b.setAttribute('aria-pressed', m === current ? 'true' : 'false');
+        b.addEventListener('click', () => onPick(m));
+        seg.appendChild(b);
       });
-      editor.appendChild(groupsWrap);
+      seg.setActive = (mode) => Array.from(seg.children).forEach(b => {
+        b.classList.toggle('active', b.dataset.mode === mode);
+        b.setAttribute('aria-pressed', b.dataset.mode === mode ? 'true' : 'false');
+      });
+      return seg;
     }
 
-    // Address fields container
-    const addrWrap = document.createElement('div');
-    addrWrap.style.cssText = 'margin-bottom: 20px;';
-    const addrLabel = document.createElement('label');
-    addrLabel.textContent = 'Address Fields';
-    addrLabel.style.display = 'block';
-    addrLabel.style.marginBottom = '12px';
-    addrWrap.appendChild(addrLabel);
-    const addrContainer = document.createElement('div');
-    addrContainer.id = 'addrFieldsContainer';
-    addrWrap.appendChild(addrContainer);
-    editor.appendChild(addrWrap);
+    // One line per known field: name · Random/Fixed/Skip · value.
+    function knownFieldRow(key, label, modes) {
+      const row = el('div', 'pe-row');
+      row.dataset.field = key;
+      const name = el('label', 'pe-name', label);
+      name.htmlFor = `pe-val-${key}`;
+      const input = el('input');
+      input.type = 'text';
+      input.id = `pe-val-${key}`;
+      input.setAttribute('aria-label', label + ' value');
+      if (key === 'gender') {
+        input.setAttribute('list', 'peGenderList');
+      }
+      const randomHint = sample[key] ? `Random — e.g. ${sample[key]}` : 'Random each fill';
 
-    // Function to render address fields with exclude/pin controls
-    function renderAddressFieldsInEditor() {
-      const addrContainer = document.getElementById('addrFieldsContainer');
-      if (!addrContainer || typeof SFProfileUI === 'undefined') return;
-      const country = countrySelect.value || profile.country || 'AU';
-
-      // Clear and render base address fields
-      SFProfileUI.renderAddressFields(document, addrContainer, country);
-
-      // Wrap each field with exclude checkbox and pin input
-      const policy = profile.policy || {};
-      const exclude = policy.exclude || [];
-      const pins = profile.pins || {};
-
-      Array.from(addrContainer.querySelectorAll('[data-field]')).forEach(input => {
-        const fieldKey = input.getAttribute('data-field');
-        const wrap = input.parentElement;
-        wrap.style.cssText = 'margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border);';
-
-        // Exclude checkbox
-        const excludeWrap = document.createElement('div');
-        excludeWrap.style.cssText = 'display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 13px;';
-        const excludeCheckbox = document.createElement('input');
-        excludeCheckbox.type = 'checkbox';
-        excludeCheckbox.id = `exclude-${fieldKey}`;
-        excludeCheckbox.checked = exclude.indexOf(fieldKey) !== -1;
-        excludeCheckbox.addEventListener('change', async () => {
-          const newExclude = excludeCheckbox.checked
-            ? (exclude.indexOf(fieldKey) === -1 ? [...exclude, fieldKey] : exclude)
-            : exclude.filter(k => k !== fieldKey);
-          const newPolicy = { ...policy, exclude: newExclude };
-          profiles = SFFormData.profilePatch(profiles, id, { policy: newPolicy });
-          await persistProfiles();
-        });
-        const excludeLabel = document.createElement('label');
-        excludeLabel.htmlFor = `exclude-${fieldKey}`;
-        excludeLabel.textContent = 'Exclude from fill';
-        excludeLabel.style.marginBottom = '0';
-        excludeWrap.appendChild(excludeCheckbox);
-        excludeWrap.appendChild(excludeLabel);
-        wrap.appendChild(excludeWrap);
-
-        // Pin input
-        const pinWrap = document.createElement('div');
-        pinWrap.style.cssText = 'display: flex; align-items: center; gap: 8px; margin-top: 6px;';
-        const pinLabel = document.createElement('label');
-        pinLabel.htmlFor = `pin-${fieldKey}`;
-        pinLabel.textContent = 'Pin value:';
-        pinLabel.style.cssText = 'font-size: 13px; margin-bottom: 0; min-width: 80px;';
-        const pinInput = document.createElement('input');
-        pinInput.type = 'text';
-        pinInput.id = `pin-${fieldKey}`;
-        pinInput.value = pins[fieldKey] || '';
-        pinInput.style.cssText = 'flex: 1; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: 4px; font-size: 13px; margin-bottom: 0;';
-        pinInput.addEventListener('change', async () => {
-          const newPins = { ...pins, [fieldKey]: pinInput.value };
-          profiles = SFFormData.profilePatch(profiles, id, { pins: newPins });
-          await persistProfiles();
-        });
-        pinWrap.appendChild(pinLabel);
-        pinWrap.appendChild(pinInput);
-        wrap.appendChild(pinWrap);
+      let mode = F.fieldMode(cur(), key);
+      function sync() {
+        const stored = (cur().pins || {})[key] || '';
+        seg.setActive(mode);
+        input.disabled = mode === 'skip';
+        input.value = mode === 'fixed' ? stored : '';
+        input.placeholder = mode === 'skip' ? 'Not filled'
+          : mode === 'random' ? randomHint
+          : (PLACEHOLDERS[key] || 'Value to use every time');
+      }
+      async function setMode(next) {
+        mode = next;
+        await save(F.setFieldMode(cur(), key, next));
+        sync();
+        if (next === 'fixed') input.focus();
+      }
+      const seg = modeSeg(modes, mode, setMode);
+      // Typing a value makes the field fixed.
+      input.addEventListener('input', () => {
+        if (mode === 'random' && input.value) { mode = 'fixed'; seg.setActive(mode); }
       });
+      input.addEventListener('change', async () => {
+        let v = input.value.trim();
+        if (key === 'dob' && v) v = F.toISODate(v) || v;
+        input.value = v;
+        const pins = Object.assign({}, cur().pins, { [key]: v });
+        const patch = Object.assign({ pins }, F.setFieldMode(cur(), key, v ? 'fixed' : mode));
+        await save(patch);
+      });
+      sync();
+      row.appendChild(name);
+      row.appendChild(seg);
+      row.appendChild(input);
+      return row;
     }
 
-    // Initial render of address fields
-    renderAddressFieldsInEditor();
+    if (!document.getElementById('peGenderList')) {
+      const dl = el('datalist');
+      dl.id = 'peGenderList';
+      ['Female', 'Male', 'Non-binary', 'Prefer not to say'].forEach(g => {
+        const o = el('option'); o.value = g; dl.appendChild(o);
+      });
+      document.body.appendChild(dl);
+    }
+
+    const GROUP_TITLES = { name: 'Name', contact: 'Contact', address: 'Address',
+      account: 'Account & personal', misc: 'Business & other' };
+    const addrCfg = typeof SFAddress !== 'undefined' ? SFAddress.getFieldConfig(profile.country || 'AU') : null;
+
+    Object.keys(F.FIELD_GROUPS).forEach(groupKey => {
+      const groups = (cur().policy && cur().policy.groups) || {};
+      const box = el('div', 'pe-group');
+      box.dataset.group = groupKey;
+      const head = el('div', 'pe-group-head');
+      const checkbox = el('input');
+      checkbox.type = 'checkbox';
+      checkbox.id = `group-${groupKey}`;
+      checkbox.checked = groups[groupKey] !== false;
+      box.classList.toggle('off', !checkbox.checked);
+      const title = el('label', null, GROUP_TITLES[groupKey] || groupKey);
+      title.htmlFor = checkbox.id;
+      const note = el('span', 'muted', checkbox.checked ? '' : 'Group not filled');
+      checkbox.addEventListener('change', async () => {
+        const policy = Object.assign({ exclude: [] }, cur().policy);
+        policy.groups = Object.assign({}, policy.groups, { [groupKey]: checkbox.checked });
+        await save({ policy });
+        box.classList.toggle('off', !checkbox.checked);
+        note.textContent = checkbox.checked ? '' : 'Group not filled';
+      });
+      head.appendChild(checkbox);
+      head.appendChild(title);
+      head.appendChild(note);
+      box.appendChild(head);
+
+      F.FIELD_GROUPS[groupKey].forEach(key => {
+        let label = F.FIELD_LABELS[key] || key;
+        if (groupKey === 'address' && addrCfg && addrCfg.fields[key]) {
+          if (!addrCfg.fields[key].show) return;
+          label = addrCfg.fields[key].label;
+        }
+        box.appendChild(knownFieldRow(key, label, F.FIELD_MODES));
+        if (key === 'email') box.appendChild(knownFieldRow('emailDomain', F.FIELD_LABELS.emailDomain, ['random', 'fixed']));
+      });
+      editor.appendChild(box);
+    });
+
+    // Custom fields: profile-specific fields found by label / field-name hints.
+    const customBox = el('div', 'pe-group pe-custom');
+    const customHead = el('div', 'pe-group-head');
+    customHead.appendChild(el('label', null, 'Custom fields'));
+    customHead.appendChild(el('span', 'muted', 'Matched by label or field name; used by Fill all'));
+    customBox.appendChild(customHead);
+    const customList = el('div');
+    customBox.appendChild(customList);
+
+    async function saveCustom(list) { await save({ customFields: list }); }
+    function patchCustom(cfId, patch) {
+      return (cur().customFields || []).map(c => c.id === cfId ? Object.assign({}, c, patch) : c);
+    }
+
+    function customFieldBlock(cf) {
+      const wrap = el('div', 'pe-cf');
+      wrap.dataset.custom = cf.id;
+      const row = el('div', 'pe-row');
+      const name = el('input');
+      name.type = 'text';
+      name.value = cf.label || '';
+      name.placeholder = 'Field, e.g. Delivery instructions';
+      name.setAttribute('aria-label', 'Custom field name');
+      name.addEventListener('change', () => saveCustom(patchCustom(cf.id, { label: name.value.trim() })));
+
+      const value = el('input');
+      value.type = 'text';
+      value.setAttribute('aria-label', 'Custom field value');
+      let mode = F.FIELD_MODES.indexOf(cf.mode) !== -1 ? cf.mode : 'fixed';
+      function sync() {
+        const stored = ((cur().customFields || []).find(c => c.id === cf.id) || {}).value || '';
+        seg.setActive(mode);
+        value.disabled = mode === 'skip';
+        value.value = mode === 'fixed' ? stored : '';
+        value.placeholder = mode === 'skip' ? 'Not filled'
+          : mode === 'random' ? 'AI chooses a value each fill' : 'Value to use every time';
+      }
+      const seg = modeSeg(F.FIELD_MODES, mode, async (next) => {
+        mode = next;
+        await saveCustom(patchCustom(cf.id, { mode: next }));
+        sync();
+        if (next === 'fixed') value.focus();
+      });
+      value.addEventListener('input', () => {
+        if (mode === 'random' && value.value) { mode = 'fixed'; seg.setActive(mode); }
+      });
+      value.addEventListener('change', () =>
+        saveCustom(patchCustom(cf.id, { value: value.value, mode: value.value ? 'fixed' : mode })));
+
+      const del = el('button', 'pe-del', '×');
+      del.type = 'button';
+      del.title = 'Remove custom field';
+      del.setAttribute('aria-label', 'Remove custom field');
+      del.addEventListener('click', async () => {
+        await saveCustom((cur().customFields || []).filter(c => c.id !== cf.id));
+        renderCustomFields();
+      });
+      sync();
+      row.appendChild(name);
+      row.appendChild(seg);
+      row.appendChild(value);
+      row.appendChild(del);
+
+      const hints = el('div', 'pe-hints');
+      [['labelHint', 'Label contains', 'e.g. delivery instructions, delivery notes'],
+       ['nameHint', 'Field name / id contains', 'e.g. delivery_notes, instructions']].forEach(([prop, text, ph]) => {
+        const box = el('div');
+        const input = el('input');
+        input.type = 'text';
+        input.id = `pe-${cf.id}-${prop}`;
+        input.value = cf[prop] || '';
+        input.placeholder = ph;
+        const lab = el('label', null, text);
+        lab.htmlFor = input.id;
+        input.addEventListener('change', () => saveCustom(patchCustom(cf.id, { [prop]: input.value })));
+        box.appendChild(lab);
+        box.appendChild(input);
+        hints.appendChild(box);
+      });
+      wrap.appendChild(row);
+      wrap.appendChild(hints);
+      return wrap;
+    }
+
+    function renderCustomFields() {
+      customList.innerHTML = '';
+      (cur().customFields || []).forEach(cf => customList.appendChild(customFieldBlock(cf)));
+    }
+
+    const CUSTOM_PRESETS = [
+      { label: 'Delivery instructions', labelHint: 'delivery instructions, delivery notes, special instructions',
+        nameHint: 'delivery, instructions', mode: 'fixed', value: 'Please leave at the front door' },
+      { label: 'Job title', labelHint: 'job title, position, occupation', nameHint: 'job_title, jobtitle, occupation', mode: 'random' },
+      { label: 'Middle name', labelHint: 'middle name', nameHint: 'middle_name, middlename', mode: 'random' },
+      { label: 'How did you hear about us', labelHint: 'how did you hear, hear about us, referral',
+        nameHint: 'referral, hear_about', mode: 'random' },
+      { label: 'Promo code', labelHint: 'promo, coupon, discount code, voucher', nameHint: 'promo, coupon, voucher', mode: 'skip' }
+    ];
+    async function addCustom(preset) {
+      const cf = Object.assign(F.newCustomField(cur()), preset || {});
+      await saveCustom((cur().customFields || []).concat([cf]));
+      renderCustomFields();
+      const block = customList.querySelector(`[data-custom="${cf.id}"] input`);
+      if (block && !preset) block.focus();
+    }
+    const presets = el('div', 'pe-presets');
+    const addBtn = el('button', 'btn btn-secondary', '+ Add custom field');
+    addBtn.type = 'button';
+    addBtn.id = 'peAddCustom';
+    addBtn.style.cssText = 'padding: 6px 12px; font-size: 13px;';
+    addBtn.addEventListener('click', () => addCustom(null));
+    presets.appendChild(addBtn);
+    presets.appendChild(el('span', 'muted', 'or add:'));
+    CUSTOM_PRESETS.forEach(p => {
+      const chip = el('button', 'pe-chip', '+ ' + p.label);
+      chip.type = 'button';
+      chip.addEventListener('click', () => addCustom(Object.assign({}, p)));
+      presets.appendChild(chip);
+    });
+    customBox.appendChild(presets);
+    editor.appendChild(customBox);
+    renderCustomFields();
   }
 
   // Wire up new profile button

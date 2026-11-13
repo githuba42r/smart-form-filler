@@ -28,7 +28,7 @@
   // Canonical types + aliases the LLM tends to return instead.
   // ---------------------------------------------------------------------------
   var CANONICAL_TYPES = ['firstname', 'lastname', 'fullname', 'username', 'email', 'phone',
-    'street1', 'street2', 'city', 'state', 'zip', 'country', 'password', 'dob', 'business',
+    'street1', 'street2', 'city', 'state', 'zip', 'country', 'password', 'dob', 'gender', 'business',
     'genericText'];
   var TYPE_ALIASES = {
     first_name: 'firstname', given_name: 'firstname', fname: 'firstname',
@@ -40,6 +40,7 @@
     address2: 'street2', address_line_2: 'street2', apartment: 'street2', unit: 'street2',
     suburb: 'city', town: 'city', province: 'state', region: 'state', territory: 'state',
     postcode: 'zip', post_code: 'zip', postal_code: 'zip', zipcode: 'zip', zip_code: 'zip',
+    sex: 'gender', gender_identity: 'gender',
     birthday: 'dob', birthdate: 'dob', birth_date: 'dob', date_of_birth: 'dob',
     company: 'business', company_name: 'business', organisation: 'business', organization: 'business',
     generictext: 'genericText'
@@ -103,12 +104,16 @@
         detectedType = 'phone'; confidence = 0.85;
       } else if (/zip|postcode|postal/.test(combined)) {
         detectedType = 'zip'; confidence = 0.85;
+      } else if (/\bgender\b|\bsex\b/.test(_spaced(combined))) {
+        detectedType = 'gender'; confidence = 0.85;
       } else if (/first.?name|fname|given.?name/.test(combined)) {
         detectedType = 'firstname'; confidence = 0.8;
       } else if (/last.?name|lname|surname|family.?name/.test(combined)) {
         detectedType = 'lastname'; confidence = 0.8;
       } else if (/\bfull.?name\b|\bname\b/.test(combined)) {
         detectedType = 'fullname'; confidence = 0.7;
+      } else if (/address.?(line.?)?2|\bapartment\b|\bapt\b|\bunit\b|\bsuite\b|\bfloor\b/.test(_spaced(combined))) {
+        detectedType = 'street2'; confidence = 0.8;
       } else if (/address|street/.test(combined)) {
         detectedType = 'street1'; confidence = 0.8;
       } else if (/\bcity\b|suburb/.test(combined)) {
@@ -148,7 +153,7 @@
   // Everything the page tells us about a field — the LLM picks values from this.
   function _describeField(f) {
     var out = { name: f.name || f.htmlName, type: f.type || f.htmlType, label: f.label };
-    ['ariaLabel', 'placeholder', 'context', 'hint', 'options', 'maxLength', 'min', 'max', 'pattern', 'required']
+    ['ariaLabel', 'placeholder', 'context', 'hint', 'profileHint', 'options', 'maxLength', 'min', 'max', 'pattern', 'required']
       .forEach(function (k) {
         var v = f[k];
         if (v !== undefined && v !== null && v !== '' && !(Array.isArray(v) && !v.length)) out[k] = v;
@@ -410,7 +415,9 @@
       JSON.stringify(_describeField(field), null, 2) + '\n\n' +
       'Rules: return ONLY the value, with no quotes or explanation. If options are listed, return one ' +
       'of them exactly. Respect maxLength/min/max/pattern. Dates as YYYY-MM-DD. Never return ' +
-      'placeholder text such as "test", "text_custom" or the field name.' + birth;
+      'placeholder text such as "test", "text_custom" or the field name.' + birth +
+      (field.profileHint ? ' The test profile describes this field as "' + field.profileHint +
+        '": choose a value that fits that description.' : '');
   }
 
   function _isoToday(offsetDays) {

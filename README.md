@@ -124,6 +124,18 @@ Built-in profiles are optimized for Australian developers:
 
 You can change the default profile in **Settings**.
 
+### Editing a profile
+
+Every known field (name, contact, address, password, date of birth, gender, company, free text) has one row with three modes:
+
+- **Random** — a new value on every fill
+- **Fixed** — always the value you enter (typing a value switches the row to Fixed)
+- **Skip** — leave the field alone
+
+Mix them freely, e.g. a fixed address with random names and emails. Fixed first/last names carry into the generated full name, username and email.
+
+**Custom fields** cover anything else a form asks for (delivery instructions, job title, promo code…). Each one is matched by phrases in the field's label or its name/id, and is Fixed, Random (the AI chooses a value guided by the custom field's name) or Skip. Custom fields are used by **Fill all**, not the group fills.
+
 ## Tips for Best Results
 
 - Re-scan after the form dynamically adds fields (SPAs)

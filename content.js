@@ -194,6 +194,49 @@
     return BIRTH_RE.test(spacedText(`${field.label} ${field.name} ${field.placeholder} ${field.context || ''}`));
   }
 
+  const GENDER_RE = /\bgender\b|\bsex\b/;
+  function isGenderField(field) {
+    return GENDER_RE.test(spacedText(`${field.label} ${field.name} ${field.placeholder} ${field.context || ''}`));
+  }
+  // Does an option's text/value stand for the wanted gender? 'Male' matches "M", "Man", "male";
+  // other values ("Non-binary", "Prefer not to say") match by text.
+  function genderOptionMatches(text, wanted) {
+    const t = String(text || '').trim().toLowerCase(), w = String(wanted || '').trim().toLowerCase();
+    if (!t || !w) return false;
+    const kind = s => /^(m|male|man|boy|mr)$/.test(s) ? 'male' : /^(f|female|woman|girl|mrs|ms|miss)$/.test(s) ? 'female' : null;
+    if (kind(t) && kind(t) === kind(w)) return true;
+    return t === w || (w.length > 2 && t.indexOf(w) !== -1);
+  }
+  // Text a choice control stands for: its value plus its own label.
+  function choiceText(el) {
+    const own = el.id ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`) : null;
+    const label = own || el.closest('label');
+    return [el.value, label ? label.textContent : ''];
+  }
+  // A gender <select> gets the option matching the profile's value (text or code).
+  function genderSelectValue(el, wanted) {
+    const opt = Array.from(el.options || []).find(o =>
+      genderOptionMatches(o.textContent, wanted) || genderOptionMatches(o.value, wanted));
+    return opt ? opt.value : null;
+  }
+  // Gender radio groups: tick the radio matching the profile's value. Returns the number ticked.
+  function fillGenderRadios(controls, wanted) {
+    if (!wanted) return 0;
+    const groups = new Map();
+    controls.forEach(el => {
+      if ((el.type || '').toLowerCase() !== 'radio' || !el.name) return;
+      if (!groups.has(el.name)) groups.set(el.name, []);
+      groups.get(el.name).push(el);
+    });
+    let n = 0;
+    groups.forEach(radios => {
+      if (!radios.some(r => isGenderField(describeControl(r)))) return;
+      const hit = radios.find(r => choiceText(r).some(t => genderOptionMatches(t, wanted)));
+      if (hit && !hit.checked && applyValueToElement(hit, 'true')) n++;
+    });
+    return n;
+  }
+
   /**
    * Which part of a date a control holds: 'day' | 'month' | 'year' | 'full'.
    * Selects are judged by their options; text inputs by their wording.
@@ -279,6 +322,7 @@
     if (/\bpassword\b|\bpwd\b|\bpass(word)?\b/.test(text)) return 'password';
     if (isBirthField(field)) return 'dob';
     if (type === 'date') return 'date'; // a date, but not a birth date — don't fill it with a DOB
+    if (isGenderField(field)) return 'gender';
 
     if (/\bfirst.?name\b|\bgiven.?name\b|\bfname\b/.test(text)) return 'firstName';
     if (/\blast.?name\b|\bsurname\b|\blname\b|\bfamily.?name\b/.test(text)) return 'lastName';
@@ -659,6 +703,129 @@
     });
   }
 
+  // --- Address type-ahead (Google Places) ---
+  // A Places-bound address box is filled the way a person uses it: type the profile's whole
+  // address, pick the first suggestion, and let the site fill its own address lines from
+  // the chosen place. Covers the classic widget (input.pac-target-input + .pac-container)
+  // and the newer <gmp-place-autocomplete> element (closed shadow root).
+  const PLACES_ELEMENT_SELECTOR = 'gmp-place-autocomplete, gmp-basic-place-autocomplete';
+
+  function shadowRootOf(host) {
+    if (host.shadowRoot) return host.shadowRoot;
+    try {
+      const dom = typeof chrome !== 'undefined' && chrome.dom;
+      return dom && dom.openOrClosedShadowRoot ? dom.openOrClosedShadowRoot(host) : null;
+    } catch (_) { return null; }
+  }
+
+  // Visible Places widgets in scope: { input, host, options() → visible suggestion elements }.
+  function findPlacesWidgets(root) {
+    const scope = root || document;
+    const out = [];
+    scope.querySelectorAll('input.pac-target-input').forEach(input => {
+      if (!isVisible(input) || input.disabled || input.readOnly) return;
+      out.push({ input, host: input, options: () =>
+        Array.from(document.querySelectorAll('.pac-container .pac-item')).filter(isVisible) });
+    });
+    scope.querySelectorAll(PLACES_ELEMENT_SELECTOR).forEach(host => {
+      const sr = shadowRootOf(host);
+      const input = sr && sr.querySelector('input');
+      if (!input || !isVisible(host)) return;
+      out.push({ input, host, options: () =>
+        Array.from(sr.querySelectorAll('[role="option"]')).filter(isVisible) });
+    });
+    return out;
+  }
+
+  function countryName(code) {
+    const A = window.SFAddress;
+    const c = A && A.listCountries && A.listCountries().find(x => x.code === code);
+    return c ? c.label.replace(/^[^A-Za-z]+/, '').trim() : (code || '');
+  }
+
+  // What to type, best first: the full address, then shorter forms in case the full
+  // (generated) address has no exact match.
+  function placesQueries(values, country) {
+    const street = values.address1 || '';
+    const locality = [values.city, values.state, values.postcode].filter(Boolean).join(' ');
+    const name = countryName(values.country || country);
+    const noNumber = street.replace(/^\s*[\d\-\/]+[a-z]?\s+/i, '');
+    const qs = [
+      [street, locality, name].filter(Boolean).join(', '),
+      [street, values.city].filter(Boolean).join(', '),
+      [noNumber, locality].filter(Boolean).join(', ')
+    ];
+    return qs.filter((q, i) => q && qs.indexOf(q) === i);
+  }
+
+  // Type into the box the way the widget expects: focus, value, input + key events.
+  function typeAhead(input, text) {
+    try { input.focus(); } catch (_) {}
+    setInputValue(input, text);
+    const last = text.slice(-1) || ' ';
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: last, bubbles: true, composed: true }));
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: last }));
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: last, bubbles: true, composed: true }));
+  }
+
+  async function waitFor(fn, ms, step) {
+    const end = Date.now() + ms;
+    for (;;) {
+      const v = fn();
+      if (v || Date.now() >= end) return v;
+      await sleep(step || 100);
+    }
+  }
+
+  // Pick a suggestion: click it, and if the list stays open, use the keyboard (↓, Enter).
+  async function pickSuggestion(widget, option) {
+    clickOption(option);
+    await sleep(150);
+    if (widget.options().length) {
+      const k = (key, keyCode) => widget.input.dispatchEvent(new KeyboardEvent('keydown',
+        { key, code: key, keyCode, which: keyCode, bubbles: true, composed: true, cancelable: true }));
+      k('ArrowDown', 40);
+      k('Enter', 13);
+    }
+  }
+
+  /**
+   * Fill a Places address box with the profile's full address and pick a suggestion.
+   * values: engine values (address1, city, state, postcode, country).
+   * Returns { input, picked: true, suggestion } once a suggestion is chosen, or null
+   * (no widget, no address to use, or no suggestions — the caller fills address lines).
+   */
+  async function fillPlacesAutocomplete(values, country, root) {
+    if (!values || !values.address1) return null;
+    const widget = findPlacesWidgets(root)[0];
+    if (!widget) return null;
+    const lines = addressLineControls(root, widget.input);
+    const queries = placesQueries(values, country);
+    for (let i = 0; i < queries.length; i++) {
+      const q = queries[i];
+      typeAhead(widget.input, q);
+      const options = await waitFor(() => { const o = widget.options(); return o.length ? o : null; }, i ? 1800 : 3000);
+      dbg('places: typed', JSON.stringify(q), '→', options ? options.length + ' suggestions' : 'none');
+      if (!options) continue;
+      const suggestion = options[0].textContent.trim().replace(/\s+/g, ' ');
+      const before = lines.map(el => el.value);
+      await pickSuggestion(widget, options[0]);
+      // The site fills its address lines from the place details (an async lookup).
+      await waitFor(() => lines.some((el, i) => el.value !== before[i]), 3000, 150);
+      return { input: widget.input, picked: true, suggestion };
+    }
+    setInputValue(widget.input, '');
+    widget.input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    return null;
+  }
+
+  const ADDRESS_CATEGORIES = ['address1', 'address2', 'city', 'state', 'postcode', 'country'];
+  // The page's own address-line controls (not the type-ahead box itself).
+  function addressLineControls(root, except) {
+    return Array.from((root || document).querySelectorAll('input:not([type="hidden"]), select'))
+      .filter(el => el !== except && ADDRESS_CATEGORIES.indexOf(getFieldCategory(describeControl(el))) !== -1);
+  }
+
   // --- ARIA option-list comboboxes (country/region, state/territory) ---
   // These are an <input aria-autocomplete="list" aria-controls="…"> backed by a
   // popup list of options. They can't be filled by setting .value — we must open
@@ -811,6 +978,17 @@
     const handled = new Set();
     const intended = new Map(); // el -> value we set (to restore after blur-geocode)
     let filledCount = 0;
+
+    // Address type-ahead first: the chosen place fills the site's own address lines.
+    const scanRoot = findScanRoot().root;
+    const placed = await fillPlacesAutocomplete(values, profile.country, scanRoot === document ? null : scanRoot);
+    if (placed) {
+      filledCount++;
+      handled.add(placed.input);
+      detectedFields.forEach(f => {
+        if (ADDRESS_CATEGORIES.indexOf(getFieldCategory(f)) !== -1 && !isEmptyValue(f.element)) handled.add(f.element);
+      });
+    }
     const MAX_PASSES = 5;
     const unsuppress = suppressPlacesDropdown();
 
@@ -832,11 +1010,23 @@
           const isSelect = el.tagName.toLowerCase() === 'select';
           const category = getFieldCategory(field);
 
-          // Skip fields gated out by policy/override
-          if (!(category in values)) continue;
-
           // Already done — only revisit a <select> a dependency reset to empty.
           if (handled.has(el) && !(isSelect && isEmptyValue(el))) continue;
+
+          // The profile's own custom fields win over the built-in categories.
+          if (type !== 'radio' && !handled.has(el)) {
+            const custom = await customFieldValue(profile, Object.assign(describeControl(el), field), el, opts);
+            if (custom) {
+              handled.add(el);
+              if (!custom.skip && applyValueToElement(el, adaptCustomValue(el, field, category, custom.value, profile.country))) {
+                changed++; filledCount++;
+              }
+              continue;
+            }
+          }
+
+          // Skip fields gated out by policy/override
+          if (!(category in values)) continue;
 
           if (type === 'checkbox' || type === 'radio') {
             const policy = type === 'checkbox' ? checkboxPolicy(field) : 'leave';
@@ -853,6 +1043,7 @@
           let value = values[category];
           if (value === null || value === undefined) continue;
           if (category === 'dob') value = adaptDateValue(el, field, value, profile.country);
+          if (category === 'gender' && isSelect) value = genderSelectValue(el, value) || value;
 
           const isAuto = isAutocompleteInput(el);
 
@@ -881,6 +1072,9 @@
         if (changed === 0) break;     // form has stabilised
         await sleep(60);              // let frameworks (React/Vue) apply dependent changes
       }
+
+      // Gender radio groups are skipped above (radios are left alone); tick the matching one.
+      if ('gender' in values) filledCount += fillGenderRadios(detectedFields.map(f => f.element), values.gender);
 
       // Safety net: restore any field a blur-geocode may have overwritten.
       reassertValues(intended);
@@ -964,6 +1158,43 @@
     return values;
   }
 
+  /**
+   * The profile's custom field matching this control, as { value } to fill, { skip: true } to
+   * leave it alone, or null when no custom field matches. Group fills ("Fill name") ignore
+   * custom fields. Random custom fields are chosen by the AI, guided by the custom field's label.
+   */
+  async function customFieldValue(profile, desc, el, opts) {
+    const F = window.SFFormData;
+    if ((opts && opts.only) || !F || !F.matchCustomField) return null;
+    const cf = F.matchCustomField(profile, desc);
+    if (!cf) return null;
+    if (cf.mode === 'skip') return { skip: true };
+    if (cf.mode === 'random') {
+      if (!window.SFAIDetector || /^(checkbox|radio)$/i.test(desc.type || '')) return { skip: true };
+      const stop = el ? showFieldThrobber(el) : null;
+      try {
+        const value = await window.SFAIDetector.generateCustomFieldValue(Object.assign({}, desc, {
+          htmlName: desc.htmlName || desc.name, htmlType: desc.htmlType || desc.type,
+          detectedType: 'custom', suggestedValue: undefined, profileHint: cf.label || cf.labelHint
+        }));
+        return value ? { value } : { skip: true };
+      } finally {
+        if (stop) stop();
+      }
+    }
+    return cf.value !== undefined && cf.value !== '' ? { value: cf.value } : { skip: true };
+  }
+  // Fit a custom field's value to its control: dates are rendered in the field's format,
+  // gender selects get their matching option.
+  function adaptCustomValue(el, field, category, value, country) {
+    const iso = window.SFFormData.toISODate(value);
+    if (iso && (category === 'dob' || category === 'date' || isBirthField(field))) {
+      return adaptDateValue(el, field, iso, country);
+    }
+    if (category === 'gender' && el.tagName.toLowerCase() === 'select') return genderSelectValue(el, value) || value;
+    return value;
+  }
+
   /** Load the currently-active profile (defaultProfile or first). */
   function getActiveProfile() { return loadProfile(null); }
 
@@ -1022,6 +1253,8 @@
     }
 
     // ── Custom / unknown field → AI picks a value from label, name, options… ─
+    // Group fills ("Fill name", "Fill address") only touch their groups' fields.
+    if (opts && opts.only) return undefined;
     // Checkboxes/radios are left alone: there is no meaningful "value" to invent.
     const htmlType = (field.htmlType || field.type || '').toLowerCase();
     if (htmlType === 'checkbox' || htmlType === 'radio') return undefined;
@@ -1047,7 +1280,10 @@
       if (!el || !el.isConnected || entry.value === undefined || entry.value === null) return;
       const isDate = entry.detectedType === 'dob' || entry.detectedType === 'date';
       const iso = isDate ? window.SFFormData.toISODate(entry.value) : null;
-      const finalValue = iso ? adaptDateValue(el, describeControl(el), iso, country) : entry.value;
+      let finalValue = iso ? adaptDateValue(el, describeControl(el), iso, country) : entry.value;
+      if (entry.detectedType === 'gender' && el.tagName.toLowerCase() === 'select') {
+        finalValue = genderSelectValue(el, finalValue) || finalValue;
+      }
       if (applyValueToElement(el, finalValue)) filledCount++;
     });
     return filledCount;
@@ -1113,6 +1349,15 @@
       // The LLM sometimes misses split DOB parts (Day / Month / Year); the page's wording wins.
       if (aiField.detectedType !== 'dob' && isBirthField(dom)) aiField.detectedType = 'dob';
       aiField.htmlName = dom.name;
+      const ctl = allControls[idx];
+      if ((ctl.type || '').toLowerCase() !== 'radio') {
+        const custom = await customFieldValue(activeProfile,
+          Object.assign({}, dom, { llmUnavailable: !!aiResult.error }), ctl, opts);
+        if (custom) {
+          if (!custom.skip) entries.push({ el: ctl, value: custom.value, detectedType: aiField.detectedType });
+          continue;
+        }
+      }
       // Checkboxes/radios follow the same rule as the heuristic path: tick consent boxes,
       // leave everything else (contact-preference toggles, "same as billing") untouched.
       const ctlType = (allControls[idx].type || '').toLowerCase();
@@ -1134,7 +1379,14 @@
       if (value !== undefined) entries.push({ el: allControls[idx], value: value, detectedType: aiField.detectedType });
     }
 
-    const filledCount = fillFormWithValues(entries, activeProfile.country);
+    // Address type-ahead: type the full address and pick a suggestion; address lines the
+    // site filled from the chosen place are left as the site set them.
+    const placed = await fillPlacesAutocomplete(standardValues, activeProfile.country, null);
+    const ADDRESS_TYPES = ['street1', 'street2', 'city', 'state', 'zip', 'country'];
+    const toFill = placed ? entries.filter(e => e.el !== placed.input &&
+      !(ADDRESS_TYPES.indexOf(e.detectedType) !== -1 && !isEmptyValue(e.el))) : entries;
+    let filledCount = fillFormWithValues(toFill, activeProfile.country) + (placed ? 1 : 0);
+    if ('gender' in standardValues) filledCount += fillGenderRadios(allControls, standardValues.gender);
     return {
       success:     true,
       filledCount,
