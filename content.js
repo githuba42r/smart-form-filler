@@ -76,6 +76,18 @@
       if (label) return label.textContent.trim();
     }
 
+    // 5b. A heading or caption just before the control's own wrapper, e.g.
+    //     <h4>Date of Birth</h4><div class="datepicker"><input …></div>
+    group = el.parentElement;
+    for (let depth = 0; group && depth < 5 && group !== document.body; depth++, group = group.parentElement) {
+      if (group.querySelectorAll(FILLABLE_SELECTOR).length > 1) break;
+      const prev = group.previousElementSibling;
+      if (!prev || prev.querySelector(FILLABLE_SELECTOR) || /^(input|select|textarea|button|script|style)$/i.test(prev.tagName)) continue;
+      if (prev.tagName === 'LABEL' && prev.htmlFor && document.getElementById(prev.htmlFor)) continue;
+      const txt = prev.textContent.replace(/\s+/g, ' ').trim();
+      if (txt.length > 1 && txt.length < 60 && /[a-zA-Z]/.test(txt)) return txt;
+    }
+
     // 6. Nearby previous sibling that looks like a label
     let sibling = el.previousElementSibling;
     let attempts = 0;
@@ -190,8 +202,20 @@
   function spacedText(str) {
     return String(str || '').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_\-\[\]]+/g, ' ').toLowerCase();
   }
+  // Help text such as "…to confirm you are over 18" marks a date field as a birth date.
+  const ADULT_RE = /\b(over|at least|older than|aged?)\s*(the age of\s*)?1[6-9]\b/;
   function isBirthField(field) {
-    return BIRTH_RE.test(spacedText(`${field.label} ${field.name} ${field.placeholder} ${field.context || ''}`));
+    const text = spacedText(`${field.label} ${field.name} ${field.placeholder} ${field.context || ''} ${field.hint || ''}`);
+    return BIRTH_RE.test(text) || (ADULT_RE.test(text) && isDateLike(field));
+  }
+
+  // Wording or a placeholder format that says the control holds a date.
+  const DATE_FORMAT_RE = /\b(d{1,2}|m{1,4}|y{2}(?:y{2})?)([\/\-. ])(d{1,2}|m{1,4})\2(y{2}(?:y{2})?|d{1,2})\b/i;
+  function isDateLike(field, el) {
+    if (/^(date|datetime-local|month)$/.test(String(field.type || '').toLowerCase())) return true;
+    const text = `${field.label} ${field.placeholder} ${field.hint || ''}`;
+    if (DATE_FORMAT_RE.test(text) || /\bdate\b|calendar/i.test(text)) return true;
+    return !!(el && el.closest && el.closest('[class*="datepicker" i], [class*="date-picker" i], .dp-container'));
   }
 
   const GENDER_RE = /\bgender\b|\bsex\b/;
@@ -271,8 +295,11 @@
     if (type === 'date') return 'YYYY-MM-DD';
     if (type === 'datetime-local') return 'YYYY-MM-DDT09:00';
     if (type === 'month') return 'YYYY-MM';
-    const hint = `${field.placeholder} ${field.label} ${el.getAttribute('data-format') || ''}`;
-    const m = /\b(d{1,2}|m{1,4}|y{2}(?:y{2})?)([\/\-. ])(d{1,2}|m{1,4})\2(y{2}(?:y{2})?|d{1,2})\b/i.exec(hint);
+    // Date-picker wrappers often carry the format too (<div class="dp-container" placeholder="DD MMM YYYY">).
+    const wrap = el.parentElement && el.parentElement.closest('[data-format], [placeholder]');
+    const hint = `${field.placeholder} ${field.label} ${el.getAttribute('data-format') || ''} ` +
+      (wrap ? `${wrap.getAttribute('data-format') || ''} ${wrap.getAttribute('placeholder') || ''}` : '');
+    const m = DATE_FORMAT_RE.exec(hint);
     if (m) return m[0].toUpperCase();
     return country === 'US' ? 'MM/DD/YYYY' : 'DD/MM/YYYY';
   }
@@ -579,6 +606,7 @@
         type: el.type || el.tagName.toLowerCase(),
         placeholder: el.placeholder || '',
         context: getGroupLabel(el),
+        hint: getHelpText(el),
         formIndex: 0,
         fieldIndex: idx
       });
@@ -1534,7 +1562,7 @@
       showToast('AI suggestion failed: ' + res.error);
       return { success: false, message: res.error };
     }
-    const isDate = isBirthField(d) || /^(date|datetime-local|month)$/.test((el.type || '').toLowerCase());
+    const isDate = isBirthField(d) || isDateLike(d, el);
     const iso = isDate ? window.SFFormData.toISODate(res.value) : null;
     const value = iso ? adaptDateValue(el, d, iso, (await loadProfile(null)).country) : res.value;
     const ok = applyValueToElement(el, value);
