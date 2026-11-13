@@ -703,6 +703,129 @@
     });
   }
 
+  // --- Address type-ahead (Google Places) ---
+  // A Places-bound address box is filled the way a person uses it: type the profile's whole
+  // address, pick the first suggestion, and let the site fill its own address lines from
+  // the chosen place. Covers the classic widget (input.pac-target-input + .pac-container)
+  // and the newer <gmp-place-autocomplete> element (closed shadow root).
+  const PLACES_ELEMENT_SELECTOR = 'gmp-place-autocomplete, gmp-basic-place-autocomplete';
+
+  function shadowRootOf(host) {
+    if (host.shadowRoot) return host.shadowRoot;
+    try {
+      const dom = typeof chrome !== 'undefined' && chrome.dom;
+      return dom && dom.openOrClosedShadowRoot ? dom.openOrClosedShadowRoot(host) : null;
+    } catch (_) { return null; }
+  }
+
+  // Visible Places widgets in scope: { input, host, options() → visible suggestion elements }.
+  function findPlacesWidgets(root) {
+    const scope = root || document;
+    const out = [];
+    scope.querySelectorAll('input.pac-target-input').forEach(input => {
+      if (!isVisible(input) || input.disabled || input.readOnly) return;
+      out.push({ input, host: input, options: () =>
+        Array.from(document.querySelectorAll('.pac-container .pac-item')).filter(isVisible) });
+    });
+    scope.querySelectorAll(PLACES_ELEMENT_SELECTOR).forEach(host => {
+      const sr = shadowRootOf(host);
+      const input = sr && sr.querySelector('input');
+      if (!input || !isVisible(host)) return;
+      out.push({ input, host, options: () =>
+        Array.from(sr.querySelectorAll('[role="option"]')).filter(isVisible) });
+    });
+    return out;
+  }
+
+  function countryName(code) {
+    const A = window.SFAddress;
+    const c = A && A.listCountries && A.listCountries().find(x => x.code === code);
+    return c ? c.label.replace(/^[^A-Za-z]+/, '').trim() : (code || '');
+  }
+
+  // What to type, best first: the full address, then shorter forms in case the full
+  // (generated) address has no exact match.
+  function placesQueries(values, country) {
+    const street = values.address1 || '';
+    const locality = [values.city, values.state, values.postcode].filter(Boolean).join(' ');
+    const name = countryName(values.country || country);
+    const noNumber = street.replace(/^\s*[\d\-\/]+[a-z]?\s+/i, '');
+    const qs = [
+      [street, locality, name].filter(Boolean).join(', '),
+      [street, values.city].filter(Boolean).join(', '),
+      [noNumber, locality].filter(Boolean).join(', ')
+    ];
+    return qs.filter((q, i) => q && qs.indexOf(q) === i);
+  }
+
+  // Type into the box the way the widget expects: focus, value, input + key events.
+  function typeAhead(input, text) {
+    try { input.focus(); } catch (_) {}
+    setInputValue(input, text);
+    const last = text.slice(-1) || ' ';
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: last, bubbles: true, composed: true }));
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: last }));
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: last, bubbles: true, composed: true }));
+  }
+
+  async function waitFor(fn, ms, step) {
+    const end = Date.now() + ms;
+    for (;;) {
+      const v = fn();
+      if (v || Date.now() >= end) return v;
+      await sleep(step || 100);
+    }
+  }
+
+  // Pick a suggestion: click it, and if the list stays open, use the keyboard (↓, Enter).
+  async function pickSuggestion(widget, option) {
+    clickOption(option);
+    await sleep(150);
+    if (widget.options().length) {
+      const k = (key, keyCode) => widget.input.dispatchEvent(new KeyboardEvent('keydown',
+        { key, code: key, keyCode, which: keyCode, bubbles: true, composed: true, cancelable: true }));
+      k('ArrowDown', 40);
+      k('Enter', 13);
+    }
+  }
+
+  /**
+   * Fill a Places address box with the profile's full address and pick a suggestion.
+   * values: engine values (address1, city, state, postcode, country).
+   * Returns { input, picked: true, suggestion } once a suggestion is chosen, or null
+   * (no widget, no address to use, or no suggestions — the caller fills address lines).
+   */
+  async function fillPlacesAutocomplete(values, country, root) {
+    if (!values || !values.address1) return null;
+    const widget = findPlacesWidgets(root)[0];
+    if (!widget) return null;
+    const lines = addressLineControls(root, widget.input);
+    const queries = placesQueries(values, country);
+    for (let i = 0; i < queries.length; i++) {
+      const q = queries[i];
+      typeAhead(widget.input, q);
+      const options = await waitFor(() => { const o = widget.options(); return o.length ? o : null; }, i ? 1800 : 3000);
+      dbg('places: typed', JSON.stringify(q), '→', options ? options.length + ' suggestions' : 'none');
+      if (!options) continue;
+      const suggestion = options[0].textContent.trim().replace(/\s+/g, ' ');
+      const before = lines.map(el => el.value);
+      await pickSuggestion(widget, options[0]);
+      // The site fills its address lines from the place details (an async lookup).
+      await waitFor(() => lines.some((el, i) => el.value !== before[i]), 3000, 150);
+      return { input: widget.input, picked: true, suggestion };
+    }
+    setInputValue(widget.input, '');
+    widget.input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    return null;
+  }
+
+  const ADDRESS_CATEGORIES = ['address1', 'address2', 'city', 'state', 'postcode', 'country'];
+  // The page's own address-line controls (not the type-ahead box itself).
+  function addressLineControls(root, except) {
+    return Array.from((root || document).querySelectorAll('input:not([type="hidden"]), select'))
+      .filter(el => el !== except && ADDRESS_CATEGORIES.indexOf(getFieldCategory(describeControl(el))) !== -1);
+  }
+
   // --- ARIA option-list comboboxes (country/region, state/territory) ---
   // These are an <input aria-autocomplete="list" aria-controls="…"> backed by a
   // popup list of options. They can't be filled by setting .value — we must open
@@ -855,6 +978,17 @@
     const handled = new Set();
     const intended = new Map(); // el -> value we set (to restore after blur-geocode)
     let filledCount = 0;
+
+    // Address type-ahead first: the chosen place fills the site's own address lines.
+    const scanRoot = findScanRoot().root;
+    const placed = await fillPlacesAutocomplete(values, profile.country, scanRoot === document ? null : scanRoot);
+    if (placed) {
+      filledCount++;
+      handled.add(placed.input);
+      detectedFields.forEach(f => {
+        if (ADDRESS_CATEGORIES.indexOf(getFieldCategory(f)) !== -1 && !isEmptyValue(f.element)) handled.add(f.element);
+      });
+    }
     const MAX_PASSES = 5;
     const unsuppress = suppressPlacesDropdown();
 
@@ -1245,7 +1379,13 @@
       if (value !== undefined) entries.push({ el: allControls[idx], value: value, detectedType: aiField.detectedType });
     }
 
-    let filledCount = fillFormWithValues(entries, activeProfile.country);
+    // Address type-ahead: type the full address and pick a suggestion; address lines the
+    // site filled from the chosen place are left as the site set them.
+    const placed = await fillPlacesAutocomplete(standardValues, activeProfile.country, null);
+    const ADDRESS_TYPES = ['street1', 'street2', 'city', 'state', 'zip', 'country'];
+    const toFill = placed ? entries.filter(e => e.el !== placed.input &&
+      !(ADDRESS_TYPES.indexOf(e.detectedType) !== -1 && !isEmptyValue(e.el))) : entries;
+    let filledCount = fillFormWithValues(toFill, activeProfile.country) + (placed ? 1 : 0);
     if ('gender' in standardValues) filledCount += fillGenderRadios(allControls, standardValues.gender);
     return {
       success:     true,

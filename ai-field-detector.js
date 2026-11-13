@@ -112,6 +112,8 @@
         detectedType = 'lastname'; confidence = 0.8;
       } else if (/\bfull.?name\b|\bname\b/.test(combined)) {
         detectedType = 'fullname'; confidence = 0.7;
+      } else if (/address.?(line.?)?2|\bapartment\b|\bapt\b|\bunit\b|\bsuite\b|\bfloor\b/.test(_spaced(combined))) {
+        detectedType = 'street2'; confidence = 0.8;
       } else if (/address|street/.test(combined)) {
         detectedType = 'street1'; confidence = 0.8;
       } else if (/\bcity\b|suburb/.test(combined)) {
